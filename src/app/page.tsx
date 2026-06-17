@@ -1,0 +1,22 @@
+import Link from "next/link";
+
+export default function HomePage() {
+  return (
+    <div className="flex min-h-[60vh] flex-col items-center justify-center text-center">
+      <h1 className="text-4xl font-bold tracking-tight text-zinc-800">
+        ETTON 效率提升助手
+      </h1>
+      <p className="mt-4 text-lg text-zinc-500">
+        电商效率提升工具集
+      </p>
+      <div className="mt-8 flex gap-4">
+        <Link
+          href="/insurance-split"
+          className="rounded-lg bg-zinc-800 px-5 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-zinc-700 transition-colors"
+        >
+          📦 保单投保区间拆分
+        </Link>
+      </div>
+    </div>
+  );
+}
