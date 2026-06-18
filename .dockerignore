@@ -1,0 +1,11 @@
+node_modules
+.next
+.git
+.claude
+保单拆分功能
+public/data
+public/output
+test_output.xlsx
+start-claude.ps1
+.env
+.env*.local

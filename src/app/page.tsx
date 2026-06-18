@@ -9,12 +9,18 @@ export default function HomePage() {
       <p className="mt-4 text-lg text-zinc-500">
         电商效率提升工具集
       </p>
-      <div className="mt-8 flex gap-4">
+      <div className="mt-8 flex flex-wrap justify-center gap-4">
         <Link
           href="/insurance-split"
           className="rounded-lg bg-zinc-800 px-5 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-zinc-700 transition-colors"
         >
           📦 保单投保区间拆分
+        </Link>
+        <Link
+          href="/pacific-convert"
+          className="rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-blue-500 transition-colors"
+        >
+          🚢 太平洋货箱清单转换
         </Link>
       </div>
     </div>
