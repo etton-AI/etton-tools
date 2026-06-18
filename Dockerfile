@@ -8,6 +8,7 @@ RUN npm ci
 
 # 构建
 COPY . .
+RUN mkdir -p /app/public
 RUN npm run build
 
 # ---- Production Stage ----
