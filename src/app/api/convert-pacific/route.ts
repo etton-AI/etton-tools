@@ -1,17 +1,48 @@
 /**
- * POST /api/convert-pacific — 上传货箱清单 Excel，返回太平洋投保清单
+ * POST /api/convert-pacific — 上传货箱清单 Excel + 汇率，返回拆分结果摘要 + 下载链接
+ * GET  /api/convert-pacific?session=xxx&file=xxx — 下载单个区间文件或 all.zip
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { convertPacificInsurance } from "@/lib/convert-pacific-insurance";
+import {
+  convertAndSplitPacific,
+  generatePacificZip,
+  ExchangeRates,
+  PacificSplitResult,
+} from "@/lib/convert-pacific-insurance";
 import { tmpdir } from "os";
 import { join } from "path";
 import { writeFileSync, unlinkSync } from "fs";
 
+// In-memory session store
+const store = new Map<string, { result: PacificSplitResult; createdAt: number }>();
+
+function cleanup() {
+  const cutoff = Date.now() - 30 * 60 * 1000;
+  for (const [k, v] of store) {
+    if (v.createdAt < cutoff) store.delete(k);
+  }
+}
+
+function makeSessionId(): string {
+  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+}
+
+function parseRates(formData: FormData): ExchangeRates {
+  return {
+    USD: parseFloat(formData.get("rateUSD") as string) || 7,
+    EUR: parseFloat(formData.get("rateEUR") as string) || 8,
+    GBP: parseFloat(formData.get("rateGBP") as string) || 9,
+  };
+}
+
 export async function POST(request: NextRequest) {
   try {
+    cleanup();
+
     const formData = await request.formData();
     const file = formData.get("file");
+    const rates = parseRates(formData);
 
     if (!file || !(file instanceof File)) {
       return NextResponse.json(
@@ -30,31 +61,44 @@ export async function POST(request: NextRequest) {
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
-    console.log(`📖 Pacific convert: ${file.name} (${(buffer.length / 1024).toFixed(1)} KB)`);
+    console.log(
+      `📖 Pacific convert: ${file.name} (${(buffer.length / 1024).toFixed(1)} KB), rates: USD=${rates.USD} EUR=${rates.EUR} GBP=${rates.GBP}`
+    );
 
-    // Write to temp file — exceljs load(buffer) can fail in Node.js runtime
     const tmpPath = join(tmpdir(), `pacific_upload_${Date.now()}.xlsx`);
     writeFileSync(tmpPath, buffer);
 
-    let result;
+    let result: PacificSplitResult;
     try {
-      result = await convertPacificInsurance(tmpPath, file.name);
+      result = await convertAndSplitPacific(tmpPath, file.name, rates);
     } finally {
       try { unlinkSync(tmpPath); } catch {}
     }
 
-    console.log(`✅ Pacific convert: ${result.rowCount} rows mapped`);
+    const sessionId = makeSessionId();
+    store.set(sessionId, { result, createdAt: Date.now() });
 
-    // Return the file directly for download
-    const outFileName = file.name
-      .replace(/\.xlsx?$/i, "")
-      .replace(/[\\/:*?"<>|]/g, "_");
+    console.log(
+      `✅ Pacific split: ${result.totalRows} rows → ${result.intervals.filter((i) => i.rowCount > 0).length} non-empty intervals`
+    );
 
-    return new NextResponse(new Uint8Array(result.buffer), {
-      headers: {
-        "Content-Type":
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(outFileName + "_太平洋投保清单.xlsx")}`,
+    // Return summary without buffer data
+    return NextResponse.json({
+      sessionId,
+      sourceFile: result.sourceFile,
+      totalRows: result.totalRows,
+      skippedRows: result.skippedRows,
+      intervals: result.intervals.map((iv) => ({
+        name: iv.name,
+        fileName: iv.fileName,
+        rowCount: iv.rowCount,
+      })),
+      downloads: {
+        allZip: `/api/convert-pacific?session=${sessionId}&file=all.zip`,
+        files: result.intervals.map(
+          (iv) =>
+            `/api/convert-pacific?session=${sessionId}&file=${encodeURIComponent(iv.fileName)}`
+        ),
       },
     });
   } catch (error) {
@@ -70,3 +114,63 @@ export async function POST(request: NextRequest) {
     );
   }
 }
+
+export async function GET(request: NextRequest) {
+  cleanup();
+
+  const { searchParams } = new URL(request.url);
+  const sessionId = searchParams.get("session");
+  const fileName = searchParams.get("file");
+
+  if (!sessionId || !fileName) {
+    return NextResponse.json(
+      { error: "Missing session or file parameter" },
+      { status: 400 }
+    );
+  }
+
+  const entry = store.get(sessionId);
+  if (!entry) {
+    return NextResponse.json(
+      { error: "会话已过期，请重新上传文件" },
+      { status: 404 }
+    );
+  }
+
+  // ZIP download
+  if (fileName === "all.zip") {
+    const zipBuffer = await generatePacificZip(entry.result);
+    return new NextResponse(new Uint8Array(zipBuffer), {
+      headers: {
+        "Content-Type": "application/zip",
+        "Content-Disposition": `attachment; filename="太平洋货箱清单拆分结果.zip"`,
+      },
+    });
+  }
+
+  // Individual interval file
+  const interval = entry.result.intervals.find((iv) => iv.fileName === fileName);
+  if (!interval) {
+    return NextResponse.json(
+      { error: `文件 "${fileName}" 不存在` },
+      { status: 404 }
+    );
+  }
+
+  return new NextResponse(new Uint8Array(interval.buffer), {
+    headers: {
+      "Content-Type":
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+    },
+  });
+}
+
+// Increase body size limit for large Excel uploads
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: "50mb",
+    },
+  },
+};

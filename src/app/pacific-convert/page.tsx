@@ -2,61 +2,102 @@
 
 import { useState, useCallback, useRef } from "react";
 
+// ============================================================
+// Types
+// ============================================================
+
+interface IntervalSummary {
+  name: string;
+  fileName: string;
+  rowCount: number;
+}
+
+interface ConvertResponse {
+  sessionId: string;
+  sourceFile: string;
+  totalRows: number;
+  skippedRows: number;
+  intervals: IntervalSummary[];
+  downloads: {
+    allZip: string;
+    files: string[];
+  };
+  error?: string;
+}
+
+// ============================================================
+// Color palette
+// ============================================================
+
+const INTERVAL_COLORS = [
+  { bg: "bg-blue-50", border: "border-blue-300", text: "text-blue-700", badge: "bg-blue-100 text-blue-700" },
+  { bg: "bg-emerald-50", border: "border-emerald-300", text: "text-emerald-700", badge: "bg-emerald-100 text-emerald-700" },
+  { bg: "bg-amber-50", border: "border-amber-300", text: "text-amber-700", badge: "bg-amber-100 text-amber-700" },
+  { bg: "bg-orange-50", border: "border-orange-300", text: "text-orange-700", badge: "bg-orange-100 text-orange-700" },
+  { bg: "bg-rose-50", border: "border-rose-300", text: "text-rose-700", badge: "bg-rose-100 text-rose-700" },
+  { bg: "bg-violet-50", border: "border-violet-300", text: "text-violet-700", badge: "bg-violet-100 text-violet-700" },
+  { bg: "bg-cyan-50", border: "border-cyan-300", text: "text-cyan-700", badge: "bg-cyan-100 text-cyan-700" },
+  { bg: "bg-lime-50", border: "border-lime-300", text: "text-lime-700", badge: "bg-lime-100 text-lime-700" },
+  { bg: "bg-pink-50", border: "border-pink-300", text: "text-pink-700", badge: "bg-pink-100 text-pink-700" },
+  { bg: "bg-teal-50", border: "border-teal-300", text: "text-teal-700", badge: "bg-teal-100 text-teal-700" },
+];
+
+function getIntervalColor(idx: number) {
+  return INTERVAL_COLORS[idx % INTERVAL_COLORS.length];
+}
+
+
+// ============================================================
+// Page
+// ============================================================
+
 export default function PacificConvertPage() {
+  const [rates, setRates] = useState({ USD: 7, EUR: 8, GBP: 9 });
   const [isDragging, setIsDragging] = useState(false);
   const [processing, setProcessing] = useState(false);
-  const [fileName, setFileName] = useState<string | null>(null);
+  const [result, setResult] = useState<ConvertResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleFile = useCallback(async (file: File) => {
-    if (!file.name.endsWith(".xlsx") && !file.name.endsWith(".xls")) {
-      setError("只支持 .xlsx 或 .xls 格式的 Excel 文件");
-      return;
-    }
-
-    setProcessing(true);
-    setError(null);
-    setFileName(file.name);
-
-    try {
-      const formData = new FormData();
-      formData.append("file", file);
-
-      const res = await fetch("/api/convert-pacific", {
-        method: "POST",
-        body: formData,
-      });
-
-      if (!res.ok) {
-        const data = await res.json();
-        setError(data.error || "转换失败");
+  const handleFile = useCallback(
+    async (file: File) => {
+      if (!file.name.endsWith(".xlsx") && !file.name.endsWith(".xls")) {
+        setError("只支持 .xlsx 或 .xls 格式的 Excel 文件");
         return;
       }
 
-      // Trigger file download
-      const blob = await res.blob();
-      const disposition = res.headers.get("Content-Disposition");
-      let downloadName = file.name.replace(/\.xlsx?$/i, "") + "_太平洋投保清单.xlsx";
-      if (disposition) {
-        const match = disposition.match(/filename\*?=(?:UTF-8'')?(.+)/i);
-        if (match) downloadName = decodeURIComponent(match[1]);
-      }
+      setProcessing(true);
+      setError(null);
+      setResult(null);
 
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = downloadName;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch {
-      setError("网络错误，请重试");
-    } finally {
-      setProcessing(false);
-    }
-  }, []);
+      try {
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("rateUSD", String(rates.USD));
+        formData.append("rateEUR", String(rates.EUR));
+        formData.append("rateGBP", String(rates.GBP));
+
+        const res = await fetch("/api/convert-pacific", {
+          method: "POST",
+          body: formData,
+        });
+
+        const data: ConvertResponse = await res.json();
+
+        if (!res.ok) {
+          setError(data.error || "转换失败");
+          return;
+        }
+
+        setResult(data);
+      } catch {
+        setError("网络错误，请重试");
+      } finally {
+        setProcessing(false);
+      }
+    },
+    [rates]
+  );
 
   const onDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -87,7 +128,7 @@ export default function PacificConvertPage() {
   );
 
   const reset = useCallback(() => {
-    setFileName(null);
+    setResult(null);
     setError(null);
   }, []);
 
@@ -99,83 +140,92 @@ export default function PacificConvertPage() {
           🚢 太平洋货箱清单转换
         </h1>
         <p className="mt-1 text-sm text-zinc-500">
-          上传易通货箱清单 Excel，自动按模板公式转换为太平洋投保清单并下载
+          上传易通货箱清单 Excel，自动转换为太平洋投保清单并按单箱货值(RMB)拆分
         </p>
       </div>
 
-      {/* Mapping info */}
-      <div className="rounded-lg border border-zinc-200 bg-zinc-50/50 p-4">
-        <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-2">
-          转换映射
+      {/* Exchange Rate Inputs */}
+      <div className="rounded-lg border border-zinc-200 bg-white p-4">
+        <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-3">
+          外币汇率设置
         </p>
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-1 text-sm text-zinc-600">
-          <span>FBA ID → 入仓编号</span>
-          <span>中文+英文品名 → DESCRIPTION</span>
-          <span>申报总数量 → QTY PCS</span>
-          <span>单个产品申报货值 → UNIT VALUE</span>
-          <span>总申报货值 → TOTAL VALUE</span>
-          <span>申报币种 → 币种</span>
-          <span>总箱数 → CTNS</span>
-          <span>单箱毛重 → G.W.(KG)</span>
-          <span>长×宽×高/10⁶ → MEASUREMENT</span>
+        <div className="flex flex-wrap gap-4">
+          <RateInput
+            label="USD 美元"
+            value={rates.USD}
+            onChange={(v) => setRates((r) => ({ ...r, USD: v }))}
+          />
+          <RateInput
+            label="EUR 欧元"
+            value={rates.EUR}
+            onChange={(v) => setRates((r) => ({ ...r, EUR: v }))}
+          />
+          <RateInput
+            label="GBP 英镑"
+            value={rates.GBP}
+            onChange={(v) => setRates((r) => ({ ...r, GBP: v }))}
+          />
         </div>
+        <p className="mt-2 text-xs text-zinc-400">
+          用于计算每箱人民币货值：总申报货值 ÷ 总箱数 × 汇率。未列出的币种默认按 1 计算。
+        </p>
       </div>
 
       {/* Upload Area */}
-      <div
-        onDragOver={onDragOver}
-        onDragLeave={onDragLeave}
-        onDrop={onDrop}
-        onClick={() => !processing && fileInputRef.current?.click()}
-        className={`
-          flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed p-12 transition-colors
-          ${
-            isDragging
-              ? "border-blue-400 bg-blue-50"
-              : "border-zinc-300 bg-zinc-50 hover:border-zinc-400 hover:bg-zinc-100"
-          }
-          ${processing ? "pointer-events-none opacity-60" : ""}
-        `}
-      >
-        {processing ? (
-          <>
-            <div className="mb-4 h-10 w-10 animate-spin rounded-full border-4 border-zinc-300 border-t-blue-600" />
-            <p className="text-lg font-medium text-zinc-600">正在转换中...</p>
-            <p className="mt-1 text-sm text-zinc-400">
-              {fileName} — 读取数据、应用映射公式
-            </p>
-          </>
-        ) : (
-          <>
-            <svg
-              className="mb-4 h-12 w-12 text-zinc-400"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={1.5}
-                d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
-              />
-            </svg>
-            <p className="text-lg font-medium text-zinc-600">
-              拖拽货箱清单 Excel 到此处，或点击上传
-            </p>
-            <p className="mt-1 text-sm text-zinc-400">
-              支持 .xlsx / .xls 格式 · 自动匹配表头列
-            </p>
-          </>
-        )}
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".xlsx,.xls"
-          onChange={onFileChange}
-          className="hidden"
-        />
-      </div>
+      {!result && (
+        <div
+          onDragOver={onDragOver}
+          onDragLeave={onDragLeave}
+          onDrop={onDrop}
+          onClick={() => !processing && fileInputRef.current?.click()}
+          className={`
+            flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed p-12 transition-colors
+            ${
+              isDragging
+                ? "border-blue-400 bg-blue-50"
+                : "border-zinc-300 bg-zinc-50 hover:border-zinc-400 hover:bg-zinc-100"
+            }
+            ${processing ? "pointer-events-none opacity-60" : ""}
+          `}
+        >
+          {processing ? (
+            <>
+              <div className="mb-4 h-10 w-10 animate-spin rounded-full border-4 border-zinc-300 border-t-blue-600" />
+              <p className="text-lg font-medium text-zinc-600">正在处理中...</p>
+              <p className="mt-1 text-sm text-zinc-400">读取数据、计算每箱货值、生成拆分文件</p>
+            </>
+          ) : (
+            <>
+              <svg
+                className="mb-4 h-12 w-12 text-zinc-400"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={1.5}
+                  d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
+                />
+              </svg>
+              <p className="text-lg font-medium text-zinc-600">
+                拖拽货箱清单 Excel 到此处，或点击上传
+              </p>
+              <p className="mt-1 text-sm text-zinc-400">
+                支持 .xlsx / .xls 格式 · 自动按单箱货值区间拆分
+              </p>
+            </>
+          )}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx,.xls"
+            onChange={onFileChange}
+            className="hidden"
+          />
+        </div>
+      )}
 
       {/* Error */}
       {error && (
@@ -193,13 +243,139 @@ export default function PacificConvertPage() {
         </div>
       )}
 
+      {/* Results */}
+      {result && (
+        <>
+          {/* Action bar */}
+          <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-zinc-200 bg-white p-4 shadow-sm">
+            <div>
+              <p className="text-sm text-zinc-500">
+                源文件:{" "}
+                <span className="font-medium text-zinc-700">{result.sourceFile}</span>
+              </p>
+              <p className="text-sm text-zinc-500">
+                共 {result.totalRows} 行{" "}
+                {result.skippedRows > 0 && `(跳过 ${result.skippedRows} 行无效数据) `}·{" "}
+                {result.intervals.filter((i) => i.rowCount > 0).length} 个非空区间
+              </p>
+              <p className="text-xs text-zinc-400 mt-0.5">
+                当前汇率: USD={rates.USD} EUR={rates.EUR} GBP={rates.GBP}
+              </p>
+            </div>
+            <div className="flex gap-3">
+              <a
+                href={result.downloads.allZip}
+                className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700 transition-colors"
+                download
+              >
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                下载全部 (ZIP)
+              </a>
+              <button
+                onClick={reset}
+                className="inline-flex items-center gap-2 rounded-lg border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-50 transition-colors"
+              >
+                重新上传
+              </button>
+            </div>
+          </div>
+
+          {/* Interval cards */}
+          <div className="space-y-4">
+            {result.intervals.map((iv, idx) => {
+              const colors = getIntervalColor(idx);
+              const isEmpty = iv.rowCount === 0;
+
+              return (
+                <div
+                  key={iv.name}
+                  className={`rounded-xl border-2 ${colors.border} ${colors.bg} ${
+                    isEmpty ? "opacity-50" : ""
+                  } overflow-hidden`}
+                >
+                  {/* Card header */}
+                  <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3">
+                    <div className="flex items-center gap-3">
+                      <span
+                        className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold ${colors.badge}`}
+                      >
+                        区间 {idx + 1}
+                      </span>
+                      <h2 className={`text-base font-bold ${colors.text}`}>
+                        {iv.name}
+                      </h2>
+                      {isEmpty ? (
+                        <span className="text-xs text-zinc-400">（无数据）</span>
+                      ) : (
+                        <span className="text-sm text-zinc-600">
+                          {iv.rowCount} 行
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {!isEmpty && (
+                        <a
+                          href={result.downloads.files[idx]}
+                          download
+                          className="inline-flex items-center gap-1.5 rounded-md bg-white/80 px-3 py-1.5 text-sm font-medium text-zinc-700 shadow-sm hover:bg-white transition-colors"
+                        >
+                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                          </svg>
+                          下载
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+
       {/* Tip */}
-      <div className="rounded-lg border border-zinc-200 bg-white p-4 text-sm text-zinc-500">
-        <p>
-          💡 提示：转换后的文件包含所有自动映射的字段（入仓编号、品名、数量、货值等），
-          提单号、船名航次、柜号等字段需手动补充。
-        </p>
-      </div>
+      {!result && (
+        <div className="rounded-lg border border-zinc-200 bg-white p-4 text-sm text-zinc-500">
+          <p>
+            💡 提示：上传文件后将自动按单箱人民币货值拆分为多个区间文件。
+            提单号、船名航次、柜号等字段需手动补充。
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// Mini components
+// ============================================================
+
+function RateInput({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <label className="text-sm font-medium text-zinc-600">{label}</label>
+      <input
+        type="number"
+        step="0.1"
+        min="0.1"
+        value={value}
+        onChange={(e) => {
+          const v = parseFloat(e.target.value);
+          if (!isNaN(v) && v > 0) onChange(v);
+        }}
+        className="w-20 rounded-md border border-zinc-300 px-2.5 py-1.5 text-sm text-zinc-700 focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
+      />
     </div>
   );
 }
