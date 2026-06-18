@@ -140,10 +140,11 @@ export async function GET(request: NextRequest) {
   // ZIP download
   if (fileName === "all.zip") {
     const zipBuffer = await generatePacificZip(entry.result);
+    const encoded = encodeURIComponent("太平洋货箱清单拆分结果.zip");
     return new NextResponse(new Uint8Array(zipBuffer), {
       headers: {
         "Content-Type": "application/zip",
-        "Content-Disposition": `attachment; filename="太平洋货箱清单拆分结果.zip"`,
+        "Content-Disposition": `attachment; filename="pacific_split_result.zip"; filename*=UTF-8''${encoded}`,
       },
     });
   }
@@ -157,11 +158,12 @@ export async function GET(request: NextRequest) {
     );
   }
 
+  const encodedName = encodeURIComponent(fileName);
   return new NextResponse(new Uint8Array(interval.buffer), {
     headers: {
       "Content-Type":
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+      "Content-Disposition": `attachment; filename="${fileName}"; filename*=UTF-8''${encodedName}`,
     },
   });
 }
