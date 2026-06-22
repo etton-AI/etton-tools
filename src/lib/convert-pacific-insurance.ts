@@ -292,9 +292,26 @@ export async function convertAndSplitPacific(
   const colMap = buildColumnMap(headers);
   console.log(`📋 Header row: ${headerRowNum}, columns mapped: ${Object.keys(colMap).length}`);
 
-  // Parse all data rows + compute perBoxRMB
-  const allRows: PacificDataRow[] = [];
-  let skippedRows = 0;
+  // =========================================================
+  // Phase 1: read all raw rows (including ctns=0)
+  // =========================================================
+  interface RawRow {
+    fbaId: string;
+    cnName: string;
+    enName: string;
+    qtyPcs: number;
+    unitValue: number;
+    totalValue: number;
+    currency: string;
+    ctns: number;
+    grossWeight: number;
+    lengthCm: number;
+    widthCm: number;
+    heightCm: number;
+    rowNum: number;
+  }
+
+  const rawRows: RawRow[] = [];
 
   for (let r = headerRowNum + 1; r <= srcSheet.rowCount; r++) {
     const row = srcSheet.getRow(r);
@@ -305,8 +322,6 @@ export async function convertAndSplitPacific(
 
     const cnName = row.getCell(colMap.cnName + 1).value?.toString().trim() ?? "";
     const enName = row.getCell(colMap.enName + 1).value?.toString().trim() ?? "";
-    const description = cnName + enName;
-
     const qtyPcs      = parseFloat(String(row.getCell(colMap.totalQty + 1).value ?? 0)) || 0;
     const unitValue   = parseFloat(String(row.getCell(colMap.unitValue + 1).value ?? 0)) || 0;
     const totalValue  = parseFloat(String(row.getCell(colMap.totalValue + 1).value ?? 0)) || 0;
@@ -317,28 +332,86 @@ export async function convertAndSplitPacific(
     const widthCm     = parseFloat(String(row.getCell(colMap.widthCm + 1).value ?? 0)) || 0;
     const heightCm    = parseFloat(String(row.getCell(colMap.heightCm + 1).value ?? 0)) || 0;
 
-    const measurement = (lengthCm * widthCm * heightCm) / 1000000;
+    rawRows.push({
+      fbaId, cnName, enName, qtyPcs, unitValue, totalValue,
+      currency, ctns, grossWeight, lengthCm, widthCm, heightCm,
+      rowNum: r,
+    });
+  }
 
-    // Skip rows without box count
-    if (ctns <= 0) {
+  // =========================================================
+  // Phase 2: compute merged perBoxRMB for each box group
+  //
+  // Rows with ctns=0 share a box with the preceding ctns>0 row.
+  // We merge the TOTAL VALUE across the group to compute perBoxRMB
+  // (used for interval assignment), but each row stays individual
+  // in the output Excel.
+  // =========================================================
+  // Map: rawRow index → perBoxRMB (same value for all rows in a box group)
+  const perBoxRMBByIndex = new Map<number, number>();
+
+  for (let i = 0; i < rawRows.length; i++) {
+    const raw = rawRows[i];
+
+    if (raw.ctns > 0) {
+      // Start of a box group — sum totalValue of this row + any following ctns=0 rows
+      let mergedTotalValue = raw.totalValue;
+      let mergeCount = 0;
+
+      let j = i + 1;
+      while (j < rawRows.length && rawRows[j].ctns === 0) {
+        mergedTotalValue += rawRows[j].totalValue;
+        mergeCount++;
+        j++;
+      }
+
+      if (mergeCount > 0) {
+        console.log(
+          `🔗 Row ${raw.rowNum}: box group with ${mergeCount} ctns=0 row(s) — merged totalValue=${mergedTotalValue.toFixed(2)}`
+        );
+      }
+
+      const exchangeRate = rates[raw.currency as keyof ExchangeRates] ?? 1;
+      const perBoxRMB = (mergedTotalValue / raw.ctns) * exchangeRate;
+
+      // Assign the same perBoxRMB to all rows in this group
+      for (let k = i; k < j; k++) {
+        perBoxRMBByIndex.set(k, perBoxRMB);
+      }
+    }
+    // ctns=0 rows: handled in the look-ahead above; if orphan (first row ctns=0),
+    // they won't appear in perBoxRMBByIndex at all.
+  }
+
+  // =========================================================
+  // Phase 3: build allRows — every raw row becomes an output row
+  // =========================================================
+  const allRows: PacificDataRow[] = [];
+  let skippedRows = 0;
+
+  for (let i = 0; i < rawRows.length; i++) {
+    const raw = rawRows[i];
+    const perBoxRMB = perBoxRMBByIndex.get(i);
+
+    if (perBoxRMB === undefined) {
+      // Orphan ctns=0 row at the very beginning — no group to join
       skippedRows++;
-      console.log(`⚠️  Row ${r}: ctns=${ctns} — skipping (no box count)`);
+      console.log(`⚠️  Row ${raw.rowNum}: ctns=0 without preceding box — skipping`);
       continue;
     }
 
-    // Calculate per-box RMB
-    const exchangeRate = rates[currency as keyof ExchangeRates] ?? 1;
-    const perBoxRMB = (totalValue / ctns) * exchangeRate;
+    const exchangeRate = rates[raw.currency as keyof ExchangeRates] ?? 1;
+    const measurement = (raw.lengthCm * raw.widthCm * raw.heightCm) / 1000000;
 
     allRows.push({
-      fbaId,
-      description,
-      qtyPcs,
-      unitValue,
-      totalValue,
-      currency,
-      ctns,
-      grossWeight,
+      fbaId: raw.fbaId,
+      description: raw.cnName + raw.enName,
+      qtyPcs: raw.qtyPcs,
+      unitValue: raw.unitValue,
+      totalValue: raw.totalValue,
+      currency: raw.currency,
+      ctns: raw.ctns,
+      grossWeight: raw.grossWeight,
       measurement,
       perBoxRMB,
       exchangeRate,
