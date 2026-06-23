@@ -132,37 +132,7 @@ export default function PacificConvertPage() {
     setError(null);
   }, []);
 
-  // Programmatic download (more reliable than <a> tag for binary files)
-  const downloadFile = useCallback(async (url: string, fallbackName: string) => {
-    try {
-      const res = await fetch(url);
-      if (!res.ok) {
-        const err = await res.json();
-        alert(err.error || "下载失败");
-        return;
-      }
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      // Prefer filename from Content-Disposition, fallback to provided name
-      const disposition = res.headers.get("Content-Disposition");
-      let name = fallbackName;
-      if (disposition) {
-        const match = disposition.match(/filename\*?=(?:UTF-8'')?(.+?)(?:;|$)/i);
-        if (match) {
-          try { name = decodeURIComponent(match[1]); } catch {}
-        }
-      }
-      a.download = name;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
-    } catch {
-      alert("下载失败，请检查网络连接");
-    }
-  }, []);
+  // Use <a> tags directly — avoids browser async-click popup blocker for downloads
 
   return (
     <div className="space-y-8">
@@ -295,15 +265,15 @@ export default function PacificConvertPage() {
               </p>
             </div>
             <div className="flex gap-3">
-              <button
-                onClick={() => downloadFile(result.downloads.allZip, "太平洋货箱清单拆分结果.zip")}
+              <a
+                href={result.downloads.allZip}
                 className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700 transition-colors"
               >
                 <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                 </svg>
                 下载全部 (ZIP)
-              </button>
+              </a>
               <button
                 onClick={reset}
                 className="inline-flex items-center gap-2 rounded-lg border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-50 transition-colors"
@@ -347,15 +317,15 @@ export default function PacificConvertPage() {
                     </div>
                     <div className="flex items-center gap-2">
                       {!isEmpty && (
-                        <button
-                          onClick={() => downloadFile(result.downloads.files[idx], iv.fileName)}
+                        <a
+                          href={result.downloads.files[idx]}
                           className="inline-flex items-center gap-1.5 rounded-md bg-white/80 px-3 py-1.5 text-sm font-medium text-zinc-700 shadow-sm hover:bg-white transition-colors"
                         >
                           <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                           </svg>
                           下载
-                        </button>
+                        </a>
                       )}
                     </div>
                   </div>
