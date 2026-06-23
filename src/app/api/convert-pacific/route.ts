@@ -142,11 +142,13 @@ export async function GET(request: NextRequest) {
     const zipBuffer = await generatePacificZip(entry.result);
     const baseName = entry.result.sourceFile.replace(/\.(xlsx?|xls)$/i, "");
     const zipName = `${baseName} 太平洋拆分结果.zip`;
+    // ASCII fallback must NOT contain non-ASCII characters (Chinese etc.)
+    const asciiName = baseName.replace(/[^\x00-\x7F]/g, "_").replace(/\s+/g, "_") + "_pacific.zip";
     const encoded = encodeURIComponent(zipName);
     return new NextResponse(new Uint8Array(zipBuffer), {
       headers: {
         "Content-Type": "application/zip",
-        "Content-Disposition": `attachment; filename="${baseName}_pacific.zip"; filename*=UTF-8''${encoded}`,
+        "Content-Disposition": `attachment; filename="${asciiName}"; filename*=UTF-8''${encoded}`,
       },
     });
   }
@@ -161,11 +163,13 @@ export async function GET(request: NextRequest) {
   }
 
   const encodedName = encodeURIComponent(fileName);
+  // ASCII fallback for interval filenames (may contain Chinese)
+  const asciiInterval = fileName.replace(/[^\x00-\x7F]/g, "_");
   return new NextResponse(new Uint8Array(interval.buffer), {
     headers: {
       "Content-Type":
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      "Content-Disposition": `attachment; filename="${fileName}"; filename*=UTF-8''${encodedName}`,
+      "Content-Disposition": `attachment; filename="${asciiInterval}"; filename*=UTF-8''${encodedName}`,
     },
   });
 }
