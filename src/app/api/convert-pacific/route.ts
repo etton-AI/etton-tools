@@ -140,11 +140,13 @@ export async function GET(request: NextRequest) {
   // ZIP download
   if (fileName === "all.zip") {
     const zipBuffer = await generatePacificZip(entry.result);
-    const encoded = encodeURIComponent("太平洋货箱清单拆分结果.zip");
+    const baseName = entry.result.sourceFile.replace(/\.(xlsx?|xls)$/i, "");
+    const zipName = `${baseName} 太平洋拆分结果.zip`;
+    const encoded = encodeURIComponent(zipName);
     return new NextResponse(new Uint8Array(zipBuffer), {
       headers: {
         "Content-Type": "application/zip",
-        "Content-Disposition": `attachment; filename="pacific_split_result.zip"; filename*=UTF-8''${encoded}`,
+        "Content-Disposition": `attachment; filename="${baseName}_pacific.zip"; filename*=UTF-8''${encoded}`,
       },
     });
   }
