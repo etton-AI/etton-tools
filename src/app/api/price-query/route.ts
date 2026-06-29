@@ -6,6 +6,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getData, type PriceEntry } from "@/lib/price-store";
 
+interface PriceEntryWithCountry extends PriceEntry {
+  country?: string;
+  transport_mode?: string;
+  tax_mode?: string;
+}
+
 interface QueryParams {
   dest?: string;
   origin?: string;
@@ -15,6 +21,7 @@ interface QueryParams {
   supplier?: string;
   top?: number;
   best?: boolean;
+  country?: string;
 }
 
 function loadData(): PriceEntry[] {
@@ -97,6 +104,11 @@ function getSupplierKey(supplier: string): string {
 function query(params: QueryParams): { results: PriceEntry[]; total: number; best: PriceEntry | null } {
   const data = loadData();
   let results = [...data];
+
+  // 0. 国家过滤
+  if (params.country) {
+    results = results.filter((r) => (r as PriceEntryWithCountry).country === params.country);
+  }
 
   // 1. 目的仓
   if (params.dest) {
@@ -211,6 +223,7 @@ export async function GET(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const params: QueryParams = {
       dest: searchParams.get("dest") || undefined,
+      country: searchParams.get("country") || "美国",
       origin: searchParams.get("origin") || undefined,
       weight: searchParams.get("weight") ? parseFloat(searchParams.get("weight")!) : undefined,
       vessel: searchParams.get("vessel") || undefined,

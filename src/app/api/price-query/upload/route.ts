@@ -13,10 +13,8 @@ import os from "os";
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import { createRequire } from "module";
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 const nodeRequire = createRequire(import.meta.url);
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 function parseWithNode(filePath: string, supplier: string): PriceEntry[] {
   const fileName = path.basename(filePath);
 

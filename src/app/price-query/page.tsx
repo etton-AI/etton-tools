@@ -34,10 +34,12 @@ interface QueryResult {
 }
 
 // 常用仓库列表
-const POPULAR_WAREHOUSES = [
+const POPULAR_WAREHOUSES_US = [
   "ONT8", "LGB8", "LAX9", "SBD1", "SMF3", "SCK4", "LAS1",
   "FTW1", "DFW6", "IAH3", "MEM1", "MDW2", "IND9",
-  "ABE8", "TEB9", "AVP1", "RDU2", "CLT2",
+];
+const POPULAR_WAREHOUSES_UK = [
+  "BHX4", "LBA4", "BHX8", "BHX7", "LBA2", "MAN4", "MAN8", "LTN7", "LPL2",
 ];
 
 // 常用城市
@@ -61,6 +63,7 @@ function supplierBadge(s: string) {
 }
 
 export default function PriceQueryPage() {
+  const [country, setCountry] = useState("美国");
   const [dest, setDest] = useState("");
   const [origin, setOrigin] = useState("");
   const [weight, setWeight] = useState("");
@@ -101,6 +104,7 @@ export default function PriceQueryPage() {
     setLoading(true);
     try {
       const params = new URLSearchParams();
+      params.set("country", country);
       if (dest.trim()) params.set("dest", dest.trim());
       if (origin.trim()) params.set("origin", origin.trim());
       if (weight.trim()) params.set("weight", weight.trim());
@@ -187,9 +191,12 @@ export default function PriceQueryPage() {
         <div className="max-w-7xl mx-auto px-4 py-6">
           <div className="flex items-center justify-between">
             <div>
-              <h1 className="text-2xl font-bold">🚢 美线FBA海运比价查询</h1>
+              <h1 className="text-2xl font-bold">
+                🚢 {country === "英国" ? "英国线" : "美线"}FBA比价查询
+              </h1>
               <p className="text-blue-200 text-sm mt-1">
-                覆盖 ETTON易通 · 天图通逊 · 英美跨境 三家供应商
+                覆盖 ETTON易通 · 天图通逊 · 英美跨境
+                {country === "英国" && " · 航乐"}
                 {stats && (
                   <span className="ml-2 text-blue-300">
                     | {stats.total.toLocaleString()} 条价格数据 | 更新于 {stats.generated_at?.slice(0, 10)}
@@ -205,6 +212,24 @@ export default function PriceQueryPage() {
       <div className="max-w-7xl mx-auto px-4 py-6">
         {/* 查询表单 */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+          {/* 线路切换 */}
+          <div className="flex items-center gap-4 mb-4 pb-4 border-b border-gray-100">
+            <span className="text-sm font-medium text-gray-700">线路：</span>
+            {["美国", "英国"].map((c) => (
+              <button
+                key={c}
+                onClick={() => { setCountry(c); setDest(""); }}
+                className={`px-4 py-1.5 rounded-full text-sm font-medium transition-colors ${
+                  country === c
+                    ? "bg-blue-600 text-white"
+                    : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                }`}
+              >
+                {c === "美国" ? "🇺🇸 美线" : "🇬🇧 英国线"}
+              </button>
+            ))}
+          </div>
+
           <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
             {/* 目的仓 */}
             <div className="col-span-2 lg:col-span-1">
@@ -219,7 +244,7 @@ export default function PriceQueryPage() {
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
               />
               <datalist id="warehouse-list">
-                {POPULAR_WAREHOUSES.map((w) => (<option key={w} value={w} />))}
+                {(country === "英国" ? POPULAR_WAREHOUSES_UK : POPULAR_WAREHOUSES_US).map((w) => (<option key={w} value={w} />))}
               </datalist>
             </div>
 
@@ -336,10 +361,20 @@ export default function PriceQueryPage() {
           {/* 快捷预设 */}
           <div className="mt-3 flex flex-wrap gap-2">
             <span className="text-xs text-gray-400 pt-1">快捷:</span>
-            <button onClick={() => { setDest("ONT8"); setOrigin("深圳"); setWeight("100"); setVessel("EXX"); setMethod("卡派"); }} className="text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200 rounded text-gray-600 transition-colors">ONT8+深圳+EXX</button>
-            <button onClick={() => { setDest("ONT8"); setOrigin("深圳"); setVessel("美森"); setMethod("卡派"); setWeight(""); }} className="text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200 rounded text-gray-600 transition-colors">ONT8+美森卡派</button>
-            <button onClick={() => { setDest("LAX9"); setOrigin("义乌"); setVessel("美森"); setMethod("卡派"); }} className="text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200 rounded text-gray-600 transition-colors">LAX9+义乌+美森</button>
-            <button onClick={() => { setDest("ONT8"); setOrigin("深圳"); setMethod(""); setVessel(""); setWeight(""); }} className="text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200 rounded text-gray-600 transition-colors">ONT8所有渠道</button>
+            {country === "美国" ? (
+              <>
+                <button onClick={() => { setDest("ONT8"); setOrigin("深圳"); setWeight("100"); setVessel("EXX"); setMethod("卡派"); }} className="text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200 rounded text-gray-600 transition-colors">ONT8+深圳+EXX</button>
+                <button onClick={() => { setDest("ONT8"); setOrigin("深圳"); setVessel("美森"); setMethod("卡派"); setWeight(""); }} className="text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200 rounded text-gray-600 transition-colors">ONT8+美森卡派</button>
+                <button onClick={() => { setDest("LAX9"); setOrigin("义乌"); setVessel("美森"); setMethod("卡派"); }} className="text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200 rounded text-gray-600 transition-colors">LAX9+义乌+美森</button>
+              </>
+            ) : (
+              <>
+                <button onClick={() => { setDest("BHX4"); setOrigin("深圳"); setVessel("卡航"); }} className="text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200 rounded text-gray-600 transition-colors">BHX4+深圳+卡航</button>
+                <button onClick={() => { setDest("BHX4"); setOrigin("深圳"); setVessel("海运"); }} className="text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200 rounded text-gray-600 transition-colors">BHX4+深圳+海运</button>
+                <button onClick={() => { setDest("LBA4"); setOrigin("义乌"); setVessel("铁运"); }} className="text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200 rounded text-gray-600 transition-colors">LBA4+义乌+铁运</button>
+              </>
+            )}
+            <button onClick={() => { setDest(""); setOrigin("深圳"); setMethod(""); setVessel(""); setWeight(""); }} className="text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200 rounded text-gray-600 transition-colors">深圳所有渠道</button>
           </div>
         </div>
 

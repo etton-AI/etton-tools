@@ -12,6 +12,7 @@ const path = require("path");
 const fs = require("fs");
 const { parseETTON } = require("./etton_us");
 const { parseTiantu } = require("./tiantu_us");
+const { parseTiantuUK } = require("./tiantu_uk");
 const { parseYingmei } = require("./yingmei_us");
 
 // ── 供应商识别规则 ──
@@ -19,6 +20,8 @@ function identifySupplier(fileName) {
   const n = fileName.toLowerCase();
   // 跳过非价格表文件（船期表、出运计划等）
   if (n.includes("出运计划") || n.includes("船期") || n.includes("schedule")) return "skip";
+  // 天图英国
+  if ((n.includes("天图") || n.includes("tiantu")) && n.includes("英国")) return "tiantu_uk";
   if (n.includes("etton") || n.includes("易通")) return "etton";
   if (n.includes("天图") || n.includes("tiantu")) return "tiantu";
   if (n.includes("英美") || n.includes("yingmei")) return "yingmei";
@@ -59,6 +62,9 @@ function main() {
           break;
         case "tiantu":
           results = parseTiantu(filePath);
+          break;
+        case "tiantu_uk":
+          results = parseTiantuUK(filePath);
           break;
         case "yingmei":
           results = parseYingmei(filePath);
