@@ -8,7 +8,13 @@ RUN npm ci
 
 # 构建
 COPY . .
-RUN mkdir -p /app/public
+RUN mkdir -p /app/public/data
+
+# 生成价格数据 (解析 Excel → JSON)
+RUN node 比价工具/price_db/parsers/build_db.js
+# 复制到 public/ 使其在运行时可通过 /data/prices.json 访问
+RUN cp 比价工具/price_db/data/prices.json /app/public/data/prices.json
+
 RUN npm run build
 
 # ---- Production Stage ----
