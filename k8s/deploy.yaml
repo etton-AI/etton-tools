@@ -71,7 +71,7 @@ metadata:
     # nginx.ingress.kubernetes.io/proxy-body-size: "50m"
 spec:
   rules:
-    - host: tools.example.com   # ← 替换为你的 Sealos 域名
+    - host: deprysrenldz.cloud.sealos.io
       http:
         paths:
           - path: /
