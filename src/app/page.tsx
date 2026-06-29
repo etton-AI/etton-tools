@@ -22,12 +22,6 @@ export default function HomePage() {
         >
           🚢 太平洋货箱清单转换
         </Link>
-        <Link
-          href="/price-query"
-          className="rounded-lg bg-orange-600 px-5 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-orange-500 transition-colors"
-        >
-          💰 美线FBA比价查询
-        </Link>
       </div>
     </div>
   );
