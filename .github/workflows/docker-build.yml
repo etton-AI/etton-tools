@@ -1,4 +1,4 @@
-name: Build and Deploy to Sealos
+name: Build and Push Docker Image
 
 on:
   push:
@@ -14,9 +14,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-    outputs:
-      image: ${{ steps.meta.outputs.image }}
-      tag: ${{ steps.meta.outputs.tag }}
 
     steps:
       - name: Checkout
@@ -45,23 +42,3 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.image }}:latest
             ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup kubectl
-        uses: azure/setup-kubectl@v4
-
-      - name: Deploy to Sealos
-        run: |
-          mkdir -p $HOME/.kube
-          echo "${{ secrets.SEALOS_KUBECONFIG }}" | base64 -d > $HOME/.kube/config
-          kubectl apply -f k8s/deploy.yaml
-          kubectl set image deployment/etton-tools etton-tools=${{ needs.build.outputs.image }}:${{ needs.build.outputs.tag }} -n default
-          kubectl rollout status deployment/etton-tools -n default --timeout=120s
