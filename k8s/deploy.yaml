@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: etton-tools
+  namespace: default
+  labels:
+    app: etton-tools
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: etton-tools
+  template:
+    metadata:
+      labels:
+        app: etton-tools
+    spec:
+      containers:
+        - name: etton-tools
+          image: ghcr.io/etton-ai/etton-ecommerce-ai:latest
+          ports:
+            - containerPort: 3000
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          env:
+            - name: NODE_ENV
+              value: "production"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: etton-tools
+  namespace: default
+  labels:
+    app: etton-tools
+spec:
+  type: ClusterIP
+  selector:
+    app: etton-tools
+  ports:
+    - port: 3000
+      targetPort: 3000
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: etton-tools
+  namespace: default
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    # 以下注解按 Sealos 域名配置自行调整
+    # nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+spec:
+  rules:
+    - host: tools.example.com   # ← 替换为你的 Sealos 域名
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: etton-tools
+                port:
+                  number: 3000
