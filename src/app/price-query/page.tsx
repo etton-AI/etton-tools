@@ -77,6 +77,10 @@ export default function PriceQueryPage() {
   const [stats, setStats] = useState<{ total: number; generated_at: string } | null>(null);
   const [showExport, setShowExport] = useState(false);
   const [exportData, setExportData] = useState("");
+  const [showUpload, setShowUpload] = useState(false);
+  const [uploadFiles, setUploadFiles] = useState<FileList | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadMsg, setUploadMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   // 首次加载时获取数据统计
   useEffect(() => {
@@ -140,6 +144,30 @@ export default function PriceQueryPage() {
     a.download = `比价查询_${dest || "all"}_${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const handleUpload = async () => {
+    if (!uploadFiles || uploadFiles.length === 0) return;
+    setUploading(true);
+    setUploadMsg(null);
+    try {
+      const form = new FormData();
+      for (let i = 0; i < uploadFiles.length; i++) {
+        form.append("files", uploadFiles[i]);
+      }
+      const resp = await fetch("/api/price-query/upload", { method: "POST", body: form });
+      const data = await resp.json();
+      if (data.success) {
+        setUploadMsg({ type: "success", text: data.message });
+        setUploadFiles(null);
+        setStats(data.stats ? { total: data.totals.deduped, generated_at: new Date().toISOString() } : stats);
+      } else {
+        setUploadMsg({ type: "error", text: data.error || "上传失败" });
+      }
+    } catch {
+      setUploadMsg({ type: "error", text: "网络错误" });
+    }
+    setUploading(false);
   };
 
   const handleExportJSON = () => {
@@ -313,6 +341,101 @@ export default function PriceQueryPage() {
             <button onClick={() => { setDest("LAX9"); setOrigin("义乌"); setVessel("美森"); setMethod("卡派"); }} className="text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200 rounded text-gray-600 transition-colors">LAX9+义乌+美森</button>
             <button onClick={() => { setDest("ONT8"); setOrigin("深圳"); setMethod(""); setVessel(""); setWeight(""); }} className="text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200 rounded text-gray-600 transition-colors">ONT8所有渠道</button>
           </div>
+        </div>
+
+        {/* ── 上传区域 ── */}
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+          <button
+            onClick={() => setShowUpload(!showUpload)}
+            className="flex items-center gap-2 text-sm font-medium text-gray-600 hover:text-gray-800 transition-colors"
+          >
+            <span className={`transform transition-transform ${showUpload ? "rotate-90" : ""}`}>▶</span>
+            📤 上传供应商最新报价表
+            {stats && (
+              <span className="text-xs text-gray-400 ml-2">
+                ({stats.total.toLocaleString()} 条数据 | {stats.generated_at?.slice(0, 10)})
+              </span>
+            )}
+          </button>
+
+          {showUpload && (
+            <div className="mt-4 pt-4 border-t border-gray-100">
+              <p className="text-xs text-gray-500 mb-3">
+                上传供应商 Excel 报价表（.xlsx），系统自动识别供应商并更新价格库。支持一次上传多个文件。
+              </p>
+
+              {/* 文件拖拽区 */}
+              <div
+                className={`border-2 border-dashed rounded-lg p-6 text-center transition-colors ${
+                  uploadFiles && uploadFiles.length > 0
+                    ? "border-green-400 bg-green-50"
+                    : "border-gray-300 hover:border-blue-400 bg-gray-50"
+                }`}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setUploadFiles(e.dataTransfer.files);
+                  setUploadMsg(null);
+                }}
+              >
+                <input
+                  type="file"
+                  accept=".xlsx,.xls"
+                  multiple
+                  className="hidden"
+                  id="upload-input"
+                  onChange={(e) => {
+                    setUploadFiles(e.target.files);
+                    setUploadMsg(null);
+                  }}
+                />
+                <label htmlFor="upload-input" className="cursor-pointer">
+                  {uploadFiles && uploadFiles.length > 0 ? (
+                    <div className="text-sm text-green-700">
+                      ✅ 已选择 {uploadFiles.length} 个文件：
+                      {Array.from(uploadFiles).map((f, i) => (
+                        <span key={i} className="block text-xs mt-1">{f.name} ({(f.size / 1024).toFixed(0)} KB)</span>
+                      ))}
+                    </div>
+                  ) : (
+                    <div>
+                      <p className="text-gray-500 text-sm">拖拽 Excel 文件到此处，或<span className="text-blue-600">点击选择</span></p>
+                      <p className="text-gray-400 text-xs mt-1">支持 .xlsx / .xls 格式</p>
+                    </div>
+                  )}
+                </label>
+              </div>
+
+              {/* 上传按钮 */}
+              {uploadFiles && uploadFiles.length > 0 && (
+                <div className="mt-3 flex items-center gap-3">
+                  <button
+                    onClick={handleUpload}
+                    disabled={uploading}
+                    className="px-5 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
+                  >
+                    {uploading ? "⏳ 解析中..." : "✅ 确认上传并更新数据库"}
+                  </button>
+                  <button
+                    onClick={() => { setUploadFiles(null); setUploadMsg(null); }}
+                    className="px-3 py-2 text-sm text-gray-500 hover:text-gray-700"
+                  >
+                    取消
+                  </button>
+                </div>
+              )}
+
+              {/* 上传结果提示 */}
+              {uploadMsg && (
+                <div className={`mt-3 p-3 rounded-lg text-sm ${
+                  uploadMsg.type === "success" ? "bg-green-50 text-green-700 border border-green-200" : "bg-red-50 text-red-700 border border-red-200"
+                }`}>
+                  {uploadMsg.type === "success" ? "✅ " : "❌ "}
+                  {uploadMsg.text}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* 最优推荐 */}

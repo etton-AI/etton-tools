@@ -4,32 +4,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import fs from "fs";
-import path from "path";
-
-// ── 类型定义 ──
-interface PriceEntry {
-  supplier: string;
-  channel_name: string;
-  vessel_config: string;
-  delivery_method: string;
-  destination_code: string;
-  destination_type: string;
-  destination_region: string;
-  origin_region: string;
-  origin_cities: string[];
-  billing_type: string;
-  min_quantity: string;
-  min_quantity_value: number;
-  unit_price: number;
-  price_unit: string;
-  transit_time_min: number | null;
-  transit_time_max: number | null;
-  transit_time_desc: string;
-  claim_rule: string;
-  effective_date: string;
-  source_file: string;
-}
+import { getData, type PriceEntry } from "@/lib/price-store";
 
 interface QueryParams {
   dest?: string;
@@ -42,23 +17,9 @@ interface QueryParams {
   best?: boolean;
 }
 
-// ── 内存缓存（模块级单例，首次请求加载后常驻） ──
-let cachedData: PriceEntry[] | null = null;
-let cachedStats: { total: number; generated_at: string } | null = null;
-
 function loadData(): PriceEntry[] {
-  if (cachedData) return cachedData;
-
-  const filePath = path.join(process.cwd(), "public", "data", "prices.json");
-  if (!fs.existsSync(filePath)) {
-    throw new Error(`数据文件不存在: ${filePath}。请先运行 build_db.js 生成数据。`);
-  }
-
-  const raw = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-  cachedData = raw.data as PriceEntry[];
-  cachedStats = { total: raw.total_records, generated_at: raw.generated_at };
-  console.log(`[price-query] 数据已加载: ${cachedStats.total} 条记录 (${cachedStats.generated_at})`);
-  return cachedData;
+  const store = getData();
+  return store.data;
 }
 
 // ── 城市到供应商区域映射 ──
@@ -261,13 +222,14 @@ export async function GET(request: NextRequest) {
 
     const { results, total, best } = query(params);
 
+    const store = getData();
     return NextResponse.json({
       success: true,
       query: params,
       results,
       total,
       best,
-      stats: cachedStats,
+      stats: { total: store.total_records, generated_at: store.generated_at },
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "未知错误";
