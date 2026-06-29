@@ -52,7 +52,7 @@ function getIntervalColor(idx: number) {
 // ============================================================
 
 export default function PacificConvertPage() {
-  const [rates, setRates] = useState({ USD: 7, EUR: 8, GBP: 9 });
+  const [rates, setRates] = useState({ USD: 7, EUR: 8, GBP: 9, JPY: 0.04 });
   const [isDragging, setIsDragging] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [result, setResult] = useState<ConvertResponse | null>(null);
@@ -76,6 +76,7 @@ export default function PacificConvertPage() {
         formData.append("rateUSD", String(rates.USD));
         formData.append("rateEUR", String(rates.EUR));
         formData.append("rateGBP", String(rates.GBP));
+        formData.append("rateJPY", String(rates.JPY));
 
         const res = await fetch("/api/convert-pacific", {
           method: "POST",
@@ -166,6 +167,11 @@ export default function PacificConvertPage() {
             label="GBP 英镑"
             value={rates.GBP}
             onChange={(v) => setRates((r) => ({ ...r, GBP: v }))}
+          />
+          <RateInput
+            label="JPY 日元"
+            value={rates.JPY}
+            onChange={(v) => setRates((r) => ({ ...r, JPY: v }))}
           />
         </div>
         <p className="mt-2 text-xs text-zinc-400">
@@ -261,7 +267,7 @@ export default function PacificConvertPage() {
                 {result.intervals.filter((i) => i.rowCount > 0).length} 个非空区间
               </p>
               <p className="text-xs text-zinc-400 mt-0.5">
-                当前汇率: USD={rates.USD} EUR={rates.EUR} GBP={rates.GBP}
+                当前汇率: USD={rates.USD} EUR={rates.EUR} GBP={rates.GBP} JPY={rates.JPY}
               </p>
             </div>
             <div className="flex gap-3">

@@ -33,6 +33,7 @@ function parseRates(formData: FormData): ExchangeRates {
     USD: parseFloat(formData.get("rateUSD") as string) || 7,
     EUR: parseFloat(formData.get("rateEUR") as string) || 8,
     GBP: parseFloat(formData.get("rateGBP") as string) || 9,
+    JPY: parseFloat(formData.get("rateJPY") as string) || 0.04,
   };
 }
 
@@ -62,7 +63,7 @@ export async function POST(request: NextRequest) {
     const buffer = Buffer.from(arrayBuffer);
 
     console.log(
-      `📖 Pacific convert: ${file.name} (${(buffer.length / 1024).toFixed(1)} KB), rates: USD=${rates.USD} EUR=${rates.EUR} GBP=${rates.GBP}`
+      `📖 Pacific convert: ${file.name} (${(buffer.length / 1024).toFixed(1)} KB), rates: USD=${rates.USD} EUR=${rates.EUR} GBP=${rates.GBP} JPY=${rates.JPY}`
     );
 
     const tmpPath = join(tmpdir(), `pacific_upload_${Date.now()}.xlsx`);

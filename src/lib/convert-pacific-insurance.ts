@@ -25,6 +25,7 @@ export interface ExchangeRates {
   USD: number;
   EUR: number;
   GBP: number;
+  JPY: number;
 }
 
 /** 一个区间桶的描述 */
