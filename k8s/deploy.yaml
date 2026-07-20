@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: etton-tools
-          image: ghcr.io/etton-ai/etton-ecommerce-ai:latest
+          image: ghcr.io/etton-ai/etton-tools:latest
           ports:
             - containerPort: 3000
               protocol: TCP
@@ -71,7 +71,7 @@ metadata:
     # nginx.ingress.kubernetes.io/proxy-body-size: "50m"
 spec:
   rules:
-    - host: deprysrenldz.cloud.sealos.io
+    - host: vftnaopzqgqv.cloud.sealos.io
       http:
         paths:
           - path: /
