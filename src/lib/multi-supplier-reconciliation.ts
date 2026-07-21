@@ -393,26 +393,106 @@ async function parseSupplierBill(
   const ws = selectSheet(wb, config.sheet_name);
   if (!ws) throw new Error("Excel 文件中没有找到有效工作表");
 
-  // 找表头行
-  const headerRowNum = config.header_row;
-  const headerRow = ws.getRow(headerRowNum);
-  const headerCells: HeaderInfo[] = [];
-  headerRow.eachCell((cell, col) => {
-    const val = cellStrVal(cell);
-    if (val) headerCells.push({ col, header: val });
-  });
+  // 自动检测表头行
+  let headerRowNum = -1;
+  let headerCells: HeaderInfo[] = [];
+  let soCol = -1;
+  let amountCol = -1;
 
-  // 定位列
-  const soCol = fuzzyFindColumn(headerCells, config.so_column, config.fallback_so_column);
-  const amountCol = fuzzyFindColumn(headerCells, config.amount_column, config.fallback_amount_column);
+  // 扫描前20行，优先匹配配置的 so_column
+  for (let r = 1; r <= Math.min(ws.rowCount, 20); r++) {
+    const row = ws.getRow(r);
+    const cells: HeaderInfo[] = [];
+    row.eachCell((cell, col) => {
+      const val = cellStrVal(cell);
+      if (val) cells.push({ col, header: val });
+    });
+    if (cells.length === 0) continue;
+
+    const testSoCol = fuzzyFindColumn(cells, config.so_column, config.fallback_so_column);
+    const testAmtCol = fuzzyFindColumn(cells, config.amount_column, config.fallback_amount_column);
+
+    if (testSoCol >= 0) {
+      headerRowNum = r;
+      headerCells = cells;
+      soCol = testSoCol;
+      amountCol = testAmtCol;
+      break;
+    }
+
+    // 如果没有直接匹配，检查是否包含任意 SO 相关关键词
+    const rowText = cells.map((c) => c.header.toLowerCase()).join(" ");
+    if (/运单号|单号|so号|参考号|订单号/.test(rowText)) {
+      // 可能匹配到模糊匹配，保存作为备选
+      if (testSoCol >= 0 || testAmtCol >= 0) {
+        headerRowNum = r;
+        headerCells = cells;
+        soCol = testSoCol;
+        amountCol = testAmtCol;
+      }
+    }
+  }
+
+  // 如果自动检测失败，回退到配置的固定行
+  if (headerRowNum < 0) {
+    headerRowNum = config.header_row;
+    const headerRow = ws.getRow(headerRowNum);
+    headerRow.eachCell((cell, col) => {
+      const val = cellStrVal(cell);
+      if (val) headerCells.push({ col, header: val });
+    });
+    soCol = fuzzyFindColumn(headerCells, config.so_column, config.fallback_so_column);
+    amountCol = fuzzyFindColumn(headerCells, config.amount_column, config.fallback_amount_column);
+  }
 
   if (soCol < 0) {
-    const hdrList = headerCells.map((h) => h.header).join(", ");
-    throw new Error(`无法定位 SO 号列 "${config.so_column}"。表头: ${hdrList}`);
+    // 收集所有行前几个单元格用于调试
+    const allRowsDebug: string[] = [];
+    for (let r = 1; r <= Math.min(ws.rowCount, 10); r++) {
+      const row = ws.getRow(r);
+      const rowCells: string[] = [];
+      for (let c = 1; c <= Math.min(row.cellCount, 8); c++) {
+        const v = cellStrVal(row.getCell(c));
+        if (v) rowCells.push(`[${c}]${v}`);
+      }
+      if (rowCells.length > 0) allRowsDebug.push(`第${r}行: ${rowCells.join(", ")}`);
+    }
+    const hdrList = headerCells.map((h) => h.header).join(", ") || "(空)";
+    const debugInfo = allRowsDebug.join(" | ");
+    throw new Error(
+      `无法定位 SO 号列 "${config.so_column}"。\n` +
+      `检测到的表头行(第${headerRowNum}行): ${hdrList}\n` +
+      `文件前几行预览: ${debugInfo}`
+    );
   }
   if (amountCol < 0) {
-    const hdrList = headerCells.map((h) => h.header).join(", ");
-    throw new Error(`无法定位金额列 "${config.amount_column}"。表头: ${hdrList}`);
+    amountCol = fuzzyFindColumn(headerCells, config.amount_column, config.fallback_amount_column);
+    // 如果还是找不到，尝试在所有列中找数值最多的列作为金额列
+    if (amountCol < 0) {
+      let bestCol = -1;
+      let bestScore = 0;
+      for (const h of headerCells) {
+        const hdrText = h.header.toLowerCase().replace(/\s+/g, "");
+        if (/金额|合计|应收|应付|总价|费用/.test(hdrText)) {
+          amountCol = h.col;
+          break;
+        }
+      }
+      if (amountCol < 0) {
+        // 自动按数据检测
+        for (let c = 1; c <= Math.min(headerCells.length > 0 ? Math.max(...headerCells.map(h => h.col)) : 20, 30); c++) {
+          let numCount = 0;
+          for (let r = headerRowNum + 1; r <= Math.min(headerRowNum + 5, ws.rowCount); r++) {
+            if (cellNumVal(ws.getRow(r).getCell(c)) !== 0) numCount++;
+          }
+          if (numCount >= 3) { amountCol = c; break; }
+        }
+      }
+    }
+    if (amountCol < 0) {
+      const hdrList = headerCells.map((h) => h.header).join(", ");
+      throw new Error(`无法定位金额列 "${config.amount_column}"。表头: ${hdrList}`);
+    }
   }
 
   const soHeader = headerCells.find((h) => h.col === soCol)?.header || `col ${soCol}`;
