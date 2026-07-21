@@ -593,21 +593,35 @@ async function parsePaymentFile(filePath: string): Promise<Map<string, number>> 
     });
   }
 
-  // 定位列
+  // 定位列 — 使用评分机制，更精准的关键词匹配得分更高
   let soCol = -1;
   let amountCol = -1;
+  let soBestScore = -1;
+  let amtBestScore = -1;
 
   for (const h of headers) {
     const hClean = h.header.toLowerCase().replace(/\s+/g, "");
-    if (soCol < 0 && PAYMENT_CONFIG.so_column_keywords.some(
-      (kw) => hClean.includes(kw.toLowerCase().replace(/\s+/g, ""))
-    )) {
-      soCol = h.col;
+    // SO 列匹配
+    for (const kw of PAYMENT_CONFIG.so_column_keywords) {
+      const kwClean = kw.toLowerCase().replace(/\s+/g, "");
+      if (hClean.includes(kwClean)) {
+        const score = kwClean.length; // 更长的关键词 = 更精准
+        if (score > soBestScore) {
+          soBestScore = score;
+          soCol = h.col;
+        }
+      }
     }
-    if (amountCol < 0 && PAYMENT_CONFIG.amount_column_keywords.some(
-      (kw) => hClean.includes(kw.toLowerCase().replace(/\s+/g, ""))
-    )) {
-      amountCol = h.col;
+    // 金额列匹配
+    for (const kw of PAYMENT_CONFIG.amount_column_keywords) {
+      const kwClean = kw.toLowerCase().replace(/\s+/g, "");
+      if (hClean.includes(kwClean)) {
+        const score = kwClean.length;
+        if (score > amtBestScore) {
+          amtBestScore = score;
+          amountCol = h.col;
+        }
+      }
     }
   }
 
