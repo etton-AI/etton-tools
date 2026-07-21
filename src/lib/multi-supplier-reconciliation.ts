@@ -469,8 +469,6 @@ async function parseSupplierBill(
     amountCol = fuzzyFindColumn(headerCells, config.amount_column, config.fallback_amount_column);
     // 如果还是找不到，尝试在所有列中找数值最多的列作为金额列
     if (amountCol < 0) {
-      let bestCol = -1;
-      let bestScore = 0;
       for (const h of headerCells) {
         const hdrText = h.header.toLowerCase().replace(/\s+/g, "");
         if (/金额|合计|应收|应付|总价|费用/.test(hdrText)) {
