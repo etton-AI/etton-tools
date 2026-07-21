@@ -227,11 +227,22 @@ const SUPPLIER_CONFIGS: SupplierConfigMap = {
     fallback_amount_column: "合计",
     skip_keywords: ["合计", "小计", "总计"],
   },
+  "深圳总部": {
+    file_pattern: ["*总部*", "*散货*", "*深圳*"],
+    sheet_name: "对账单",
+    header_row: 3,
+    data_start_row: 5,
+    so_column: "SO号码",
+    fallback_so_column: "FBA单号",
+    amount_column: "总费用",
+    fallback_amount_column: "金额",
+    skip_keywords: ["合计", "小计", "总计", "开户人:", "开户行:", "账号:", "费用确认单"],
+  },
 };
 
 const PAYMENT_CONFIG: PaymentConfig = {
-  so_column_keywords: ["SO号", "SO", "系统SO号", "运单号", "SO号码"],
-  amount_column_keywords: ["应收金额", "人民币金额", "应付金额", "金额", "总金额"],
+  so_column_keywords: ["系统SO号", "SO号", "SO", "运单号", "SO号码"],
+  amount_column_keywords: ["金额(本位币)", "可销金额(本位币)", "金额（本位币）", "应收金额", "人民币金额", "应付金额", "金额", "总金额"],
 };
 
 // ============================================================
