@@ -1,12 +1,12 @@
 # ETTON TOOLS — 开发者规格文档
 
-> 最后更新: 2026-07-09 | 维护者: berry-bi
+> 最后更新: 2026-07-21 | 维护者: berry-bi
 
 ---
 
 ## 1. 项目概述与技术栈
 
-**ETTON 效率提升助手** — 基于 Next.js 的 Web 工具集，面向易通科技内部物流操作，提供保单投保区间拆分和太平洋货箱清单转换两个核心功能。
+**ETTON 效率提升助手** — 基于 Next.js 的 Web 工具集，面向易通科技内部物流操作，提供保单投保区间拆分、太平洋货箱清单转换、多供应商对账引擎和皮皮熊账单拆分四个核心功能。
 
 ### 技术栈
 
@@ -24,9 +24,9 @@
 
 ### 仓库信息
 
-- **GitHub**: `etton-ai/etton-ecommerce-ai`
-- **容器镜像**: `ghcr.io/etton-ai/etton-ecommerce-ai:latest`
-- **Sealos Ingress**: `deprysrenldz.cloud.sealos.io`
+- **GitHub**: `etton-AI/etton-tools`
+- **容器镜像**: `ghcr.io/etton-ai/etton-tools:latest`
+- **Sealos Ingress**: `vftnaopzqgqv.cloud.sealos.io`
 
 ---
 
@@ -55,7 +55,9 @@ ETTON 电商AI/
 │   │   ├── pacific-convert/
 │   │   │   └── page.tsx              # 太平洋转换页面（含汇率配置）
 │   │   ├── reconciliation/
-│   │   │   └── page.tsx              # 天图请款对账页面（双文件上传）
+│   │   │   └── page.tsx              # [旧] 单供应商对账页面（已合并入多供应商对账引擎）
+│   │   ├── multi-supplier-reconciliation/
+│   │   │   └── page.tsx              # 多供应商对账引擎页面（17 家供应商）
 │   │   ├── pipixiong-split/
 │   │   │   └── page.tsx              # 皮皮熊账单拆分页面
 │   │   └── api/
@@ -64,7 +66,9 @@ ETTON 电商AI/
 │   │       ├── convert-pacific/
 │   │       │   └── route.ts          # POST 上传（含汇率）+ GET 下载
 │   │       ├── reconciliation/
-│   │       │   └── route.ts          # POST 双文件上传 + GET 下载
+│   │       │   └── route.ts          # [旧] 单供应商对账 API
+│   │       ├── multi-supplier-reconciliation/
+│   │       │   └── route.ts          # POST 双文件上传 + GET 下载（多供应商）
 │   │       └── pipixiong-split/
 │   │           └── route.ts          # POST 上传 + GET 下载 ZIP
 │   ├── components/
@@ -72,7 +76,8 @@ ETTON 电商AI/
 │   └── lib/
 │       ├── split-insurance.ts        # 保单拆分核心逻辑 (556 行)
 │       ├── convert-pacific-insurance.ts  # 太平洋转换核心逻辑 (502 行)
-│       ├── reconciliation.ts         # 天图对账核心逻辑 (272 行)
+│       ├── reconciliation.ts         # [旧] 单供应商对账逻辑 (272 行)
+│       ├── multi-supplier-reconciliation.ts  # 多供应商对账引擎 (17家供应商配置，~870行)
 │       └── pipixiong-split.ts        # 皮皮熊拆分核心逻辑 (371 行)
 ├── 保单拆分功能/                     # 原型/实验脚本（不参与构建）
 │   ├── split_insurance.js            # 原始 Node.js 拆分脚本
@@ -97,9 +102,11 @@ ETTON 电商AI/
 
 **文件**: `src/app/page.tsx`
 
-纯展示型导航页，包含两个卡片链接：
+纯展示型导航页，包含四个卡片链接：
 - `/insurance-split` — 保单投保区间拆分
 - `/pacific-convert` — 太平洋货箱清单转换
+- `/multi-supplier-reconciliation` — 多供应商对账引擎
+- `/pipixiong-split` — 皮皮熊账单拆分
 
 无服务端逻辑，纯客户端渲染。
 
@@ -348,7 +355,77 @@ interface PacificSplitResult {
 
 ---
 
-### 3.10 皮皮熊账单拆分 — `/pipixiong-split`
+### 3.10 多供应商对账引擎 — `/multi-supplier-reconciliation`
+
+**文件**: `src/app/multi-supplier-reconciliation/page.tsx` + `src/lib/multi-supplier-reconciliation.ts` + `src/app/api/multi-supplier-reconciliation/route.ts`
+
+#### 功能
+
+1. 上传两个 Excel 文件：供应商账单 + 内部请款明细
+2. 根据文件名自动识别供应商（支持 17 家供应商）
+3. 自动检测表头行位置（扫描前20行，不再写死固定行号）
+4. 按 SO 号 FULL OUTER JOIN，比对金额差异
+5. 生成对账结果 Excel（差异行红标 + 汇总行 + 冻结首行），支持下载
+
+#### 支持的供应商（17 家）
+
+| # | 供应商 | 文件名特征 | SO 列 | 金额列 | 表头行 |
+|---|--------|-----------|-------|--------|--------|
+| 1 | 天图通逊 | `*天图*` / `*通逊*` / `*Tiantu*` | 客户运单号 | 应收金额 | 10 |
+| 2 | 星链/易通 | `*星链*` / `*易通*` / `*ETTON*` | 客户参考号 | 应收金额 | 5 |
+| 3 | 航乐 | `*航乐*` | 运单号 | 合计应收 | 4 |
+| 4 | 跨境堡/英美 | `*英美*` / `*跨境堡*` | 客户运单号 | 金额 | 2 |
+| 5 | 美琦/皓辉 | `*美琦*` / `*皓辉*` / `*zsetton*` | 客户运单号 | 合计金额 | 5 |
+| 6 | 心一 | `*心一*` | 客户运单号 | 人民币应收金额 | 8 |
+| 7 | 凯鑫 | `*凯鑫*` | 客户运单号 | 金额 | 4 |
+| 8 | 华威尔 | `*华威尔*` | 客户运单号 | 金额 | 4 |
+| 9 | 天龙 | `*天龙*` | 客户单号 | 金额 | 2 |
+| 10 | 松杰 | `*松杰*` | 客户参考号 | 应收金额 | 3 |
+| 11 | 安时达 | `*安时达*` | 单号 | 总价 | 5 |
+| 12 | 鸿珉 | `*鸿珉*` | 原单号 | 保费(RMB) | 1 |
+| 13 | 太平洋 | `*太平洋*` | 客户单号 | 金额 | 2 |
+| 14 | 一腾 | `*一腾*` | 原单号 | 费用合计 | 2 |
+| 15 | 乐丰 | `*乐丰*` | 运单号 | 金额 | 1 |
+| 16 | 深圳总部 | `*总部*` / `*散货*` / `*深圳*` | SO号码 | 总费用 | 3 |
+
+#### 核心逻辑 (`src/lib/multi-supplier-reconciliation.ts`)
+
+**导出函数**:
+- `processMultiSupplierReconciliation(billPath, paymentPath, billName, paymentName, supplier?)` → `MultiReconResult`
+- `detectSupplier(filename)` → `string | null`
+- `getAvailableSuppliers()` → `string[]`
+
+**算法流程**:
+1. `detectSupplier()` — 根据文件名正则匹配供应商
+2. `parseSupplierBill()` — 自动扫描前20行定位表头 → 模糊匹配 SO 列和金额列 → 解析数据
+3. `parsePaymentFile()` — 自动扫描前15行定位表头 → 关键词评分匹配 SO 列和金额列（优先本位币列）→ 解析数据
+4. `fullOuterJoin()` — 两个 Map 做 FULL OUTER JOIN，按状态分类排序
+5. `buildOutputWorkbook()` — exceljs 生成输出 Excel
+
+**列检测规则**:
+- **供应商账单 SO 列**: `fuzzyFindColumn()` 四级匹配：精确匹配 → 包含匹配 → 关键词拆分匹配（≥60%命中）→ 备选列
+- **供应商账单金额列**: 同四级匹配 + 自动按数值密度检测
+- **请款明细 SO 列**: 关键词匹配（`系统SO号` > `SO号` > `SO` > `运单号` > `SO号码`）+ 数据验证（连续行含有效SO号≥2）
+- **请款明细金额列**: 评分机制 — 更长的关键词（如 `金额(本位币)`）得分更高，优先匹配本位币列 → fallback 自动检测数值列
+
+**表头自动检测** (2026-07-21 新增):
+- 不再写死 `header_row`，改为扫描前 20 行
+- 每行检查是否包含 SO 列关键词（`fuzzyFindColumn`）
+- 找到匹配后立即使用该行作为表头
+- 失败时回退到配置的固定行号，并输出详细调试信息（文件前几行预览）
+
+**金额列评分机制** (2026-07-21 新增):
+- 请款明细中可能有"金额"(原币)和"金额(本位币)"(RMB)两列
+- 评分 = 关键词长度，`金额(本位币)` 长度 > `金额`，优先匹配本位币列
+- 确保对账使用统一币种，避免原币和本位币混用导致差异
+
+**跳过行检测** (2026-07-21 新增):
+- 供应商账单末尾的"开户人"、"开户行"、"账号"等行内容不含有效 SO 号，`isValidSONumber()` 自动过滤
+- 额外配置 `skip_keywords` 处理"费用确认单"等标题行
+
+---
+
+### 3.11 皮皮熊账单拆分 — `/pipixiong-split`
 
 **文件**: `src/app/pipixiong-split/page.tsx` + `src/lib/pipixiong-split.ts` + `src/app/api/pipixiong-split/route.ts`
 
@@ -393,7 +470,8 @@ interface PacificSplitResult {
 - ❌ **用户认证/登录**: LAN 工具，无权限控制
 - ❌ **持久化存储**: 拆分结果仅在内存中保存 30 分钟
 - ❌ **Claude AI 集成**: `@anthropic-ai/sdk` 已安装但未在页面/API 中使用（仅占位依赖）
-- ❌ **多 Sheet 支持**: 保单拆分仅处理 `"ETTON电商物流 下单模板"` Sheet
+- ❌ **多 Sheet 支持**: 保单拆分仅处理 `"ETTON电商物流 下单模板"` Sheet；多供应商对账自动选择数据最密集的 Sheet
+- ❌ **多币种对账**: 当前对账引擎优先匹配本位币(RMB)列，但不自动做币种转换
 - ❌ **Excel 输出自定义**: 太平洋转换输出为全新 workbook（不保留源格式），保单拆分保留克隆格式
 - ❌ **数据库**: 无任何数据库依赖
 - ❌ **i18n 国际化**: 仅中文
@@ -414,21 +492,42 @@ interface PacificSplitResult {
 2. **exceljs Buffer 类型兼容**
    - `wb.xlsx.load(buffer)` 的类型签名与 `@types/node` 的 `Buffer` 不完全兼容
    - **绕过**: 使用 `// @ts-expect-error` 注释抑制类型错误
-   - **位置**: `split-insurance.ts` 的 `generateIntervalFile()` 和 `processSplit()`
+   - **位置**: `split-insurance.ts` 和 `multi-supplier-reconciliation.ts`
 
-3. **共享公式 (Shared Formula) 展平**
+3. **ESLint 导致 Docker 构建失败** (2026-07-21)
+   - `next build` 包含 lint 检查，`prefer-const` 和 `no-unused-vars` 错误会阻断构建
+   - **教训**: 每次修改后必须运行 `npm run build` 验证，不能仅依赖 `tsc --noEmit`
+   - **影响**: 未检查的代码推送到 GitHub 后 Docker 构建会静默失败（42 秒内报错）
+
+4. **供应商账单表头行位置不固定** (2026-07-21 修复)
+   - 不同供应商甚至同一供应商不同时期的账单，表头行位置可能不同
+   - **修复**: `parseSupplierBill()` 改为扫描前 20 行自动检测
+   - **位置**: `multi-supplier-reconciliation.ts` line 395-440
+
+5. **请款明细金额列币种混用** (2026-07-21 修复)
+   - 请款明细中"金额"列可能是原币(USD)或本位币(RMB)，直接用"金额"会导致对账误差
+   - **修复**: 评分机制优先匹配"金额(本位币)"（关键词更长=得分更高）
+   - **位置**: `multi-supplier-reconciliation.ts` `parsePaymentFile()` 列检测逻辑
+
+6. **共享公式 (Shared Formula) 展平**
    - exceljs 的 `spliceRows` 删除行时会破坏共享公式引用链
    - **绕过**: `flattenFormulas()` 在删除行之前将共享公式转为独立公式（保留 result）
    - **位置**: `split-insurance.ts` line 269-293
 
-4. **内存 session 存储**
+7. **内存 session 存储**
    - 拆分结果（含 Buffer）存储在 Node.js 进程内存 Map 中
    - **风险**: 大文件多用户并发可能 OOM；进程重启丢失所有 session
    - **缓解**: 30 分钟自动过期清除
 
-5. **tailwindcss 版本锁定**
+8. **tailwindcss 版本锁定**
    - 项目使用 Tailwind CSS 4，语法与 v3 完全不同（无 `tailwind.config.ts`）
    - @tailwindcss/postcss 插件是必需的，缺失会导致样式完全丢失
+
+9. **SEALOS Deployment 易丢失** (2026-07-21)
+   - SEALOS 上 Deployment 可能因资源回收或平台升级被删除，但 Service 和 Ingress 会保留
+   - **症状**: 网站不可访问，`kubectl get deploy` 找不到 etton-tools
+   - **修复命令**: `kubectl apply -f k8s/deploy-sealos.yaml`
+   - **恢复脚本**: 项目根目录 `redeploy.sh`
 
 ### 待重构项
 
@@ -439,6 +538,9 @@ interface PacificSplitResult {
 - [ ] 添加上传进度条（当前只有旋转动画，无百分比）
 - [ ] `public/output/` 下的测试文件应清理或移到 `保单拆分功能/output/`
 - [ ] 对账功能的列检测规则可进一步细化（如支持更多金额列别名）
+- [ ] 多供应商对账引擎中 `reconciliation.ts`（旧版天图对账）可移除，统一使用 `multi-supplier-reconciliation.ts`
+- [ ] 供应商配置（17家）可考虑外置为 YAML/JSON 配置文件，支持热加载
+- [ ] SEALOS 部署增加 liveness/readiness 探针失败时的自动告警
 
 ---
 
@@ -511,9 +613,35 @@ docker run -p 3000:3000 etton-tools
 Git push main
   → GitHub Actions: docker-build.yml
     → docker/build-push-action@v5
-      → ghcr.io/etton-ai/etton-ecommerce-ai:latest + :sha
-        → Sealos 控制台手动重新部署
+      → ghcr.io/etton-ai/etton-tools:latest + :sha
+        → kubectl rollout restart deployment/etton-tools -n ns-wqw6rrmf
 ```
+
+#### 部署维护命令
+
+```bash
+# 查看 Pod 状态
+kubectl get pods -n ns-wqw6rrmf -l app=etton-tools
+
+# 重启部署（拉取最新镜像）
+kubectl rollout restart deployment/etton-tools -n ns-wqw6rrmf
+
+# 查看日志
+kubectl logs -n ns-wqw6rrmf -l app=etton-tools --tail=50
+
+# 重新创建 Deployment（如果丢失）
+kubectl apply -f k8s/deploy-sealos.yaml
+
+# 本地构建验证
+npm run build
+```
+
+#### Docker 构建失败排查
+
+1. 在 GitHub Actions 页面检查构建日志
+2. 常见原因: ESLint 错误（`npm run build` 包含 lint）
+3. 本地验证: `npm run build` 必须通过
+4. 修复后重新 push 触发构建
 
 ---
 
@@ -523,5 +651,5 @@ Git push main
 
 | 项目 | 端口 | Ingress | 用途 |
 |------|------|---------|------|
-| ETTON TOOLS | 3000 | `deprysrenldz.cloud.sealos.io` | 保单拆分 + 太平洋转换 + 天图对账 + 皮皮熊拆分 |
+| ETTON TOOLS | 3000 | `vftnaopzqgqv.cloud.sealos.io` | 保单拆分 + 太平洋转换 + 多供应商对账 + 皮皮熊拆分 |
 | Price System | 3000 | `wlylcsujbziw.cloud.sealos.io` | FBA 多供应商比价查询 |
