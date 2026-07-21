@@ -18,6 +18,7 @@ spec:
       containers:
         - name: etton-tools
           image: ghcr.io/etton-ai/etton-tools:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 3000
               protocol: TCP
@@ -43,6 +44,15 @@ spec:
           env:
             - name: NODE_ENV
               value: "production"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            runAsUser: 1001
+            seccompProfile:
+              type: RuntimeDefault
 ---
 apiVersion: v1
 kind: Service
@@ -67,8 +77,6 @@ metadata:
   namespace: default
   annotations:
     kubernetes.io/ingress.class: nginx
-    # 以下注解按 Sealos 域名配置自行调整
-    # nginx.ingress.kubernetes.io/proxy-body-size: "50m"
 spec:
   rules:
     - host: vftnaopzqgqv.cloud.sealos.io

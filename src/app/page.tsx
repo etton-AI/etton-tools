@@ -22,6 +22,18 @@ export default function HomePage() {
         >
           🚢 太平洋货箱清单转换
         </Link>
+        <Link
+          href="/multi-supplier-reconciliation"
+          className="rounded-lg bg-violet-600 px-5 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-violet-500 transition-colors"
+        >
+          🔄 多供应商对账引擎
+        </Link>
+        <Link
+          href="/pipixiong-split"
+          className="rounded-lg bg-fuchsia-600 px-5 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-fuchsia-500 transition-colors"
+        >
+          🧾 皮皮熊账单拆分
+        </Link>
       </div>
     </div>
   );
