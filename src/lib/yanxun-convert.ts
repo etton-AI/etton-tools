@@ -522,6 +522,101 @@ function setTemplateField(
 }
 
 // ============================================================
+// 只解析发货单 sheet（内存优化）
+// ============================================================
+
+/**
+ * 只加载延讯发票的第一个 sheet（发货单），跳过隐藏的 VLOOKUP 数据源表。
+ *
+ * 背景：延讯发票里发货单用 VLOOKUP 引用隐藏的「产品资料/清关信息/箱规信息」等表，
+ * 这些表连同跨簿外部链接(externalLink)可让文件解压后膨胀到几十 MB（如 3.7MB 发票解压后
+ * 26MB，其中 sheet4.xml 12MB、externalLink1.xml 6MB）。ExcelJS 的 readFile 会全量解析
+ * 所有 sheet，在内存受限环境（如 Sealos 1Gi）下会 OOM。而发货单本身往往只有几百 KB。
+ *
+ * 做法：用 JSZip 解压后仅保留第一个 sheet 及其依赖（批注/图片/sharedStrings/styles/theme），
+ * 删除其余 sheet 与 externalLinks，重写 workbook.xml / rels / [Content_Types].xml，
+ * 重新打包成精简 xlsx buffer 交给 ExcelJS.load()。
+ */
+async function loadFirstSheetOnly(filePath: string): Promise<Buffer> {
+  const raw = fs.readFileSync(filePath);
+  const zip = await JSZip.loadAsync(raw);
+
+  const wbFile = zip.file("xl/workbook.xml");
+  const relsFile = zip.file("xl/_rels/workbook.xml.rels");
+  if (!wbFile || !relsFile) return raw; // 结构异常，退回全量
+
+  const workbookXml = await wbFile.async("string");
+  const relsXml = await relsFile.async("string");
+
+  // 只有一个 sheet 且无外部链接时，无需精简，直接退回原始数据
+  const sheetsMatch = /<sheets>([\s\S]*?)<\/sheets>/.exec(workbookXml);
+  if (!sheetsMatch) return raw;
+  const sheetCount = (sheetsMatch[1].match(/<sheet\b/g) || []).length;
+  const hasExternal = /<externalReferences>/.test(workbookXml);
+  if (sheetCount <= 1 && !hasExternal) return raw;
+
+  // 定位第一个 sheet 的标签、rId 与 target
+  const firstSheetTag = /<sheet\b[^>]*?\/?>/.exec(sheetsMatch[1])?.[0];
+  if (!firstSheetTag) return raw;
+  const firstRId = /r:id="(rId\d+)"/.exec(firstSheetTag)?.[1];
+  if (!firstRId) return raw;
+  const firstTarget = new RegExp(`Id="${firstRId}"[^>]*?Target="([^"]+)"`).exec(relsXml)?.[1];
+  if (!firstTarget) return raw;
+
+  // 1) workbook.xml：只保留第一个 sheet，删除 externalReferences / definedNames
+  zip.file(
+    "xl/workbook.xml",
+    workbookXml
+      .replace(/<sheets>[\s\S]*?<\/sheets>/, `<sheets>${firstSheetTag}</sheets>`)
+      .replace(/<externalReferences>[\s\S]*?<\/externalReferences>/, "")
+      .replace(/<definedNames>[\s\S]*?<\/definedNames>/, "")
+  );
+
+  // 2) workbook.xml.rels：只保留第一个 sheet 的 worksheet 关系 + 辅助关系(theme/sharedStrings/styles/metadata)
+  zip.file(
+    "xl/_rels/workbook.xml.rels",
+    relsXml.replace(/<Relationship\b[^>]*?\/>/g, (tag) => {
+      const id = /Id="(rId\d+)"/.exec(tag)?.[1] || "";
+      const type = /Type="([^"]+)"/.exec(tag)?.[1] || "";
+      if (type.endsWith("/worksheet")) return id === firstRId ? tag : "";
+      if (type.endsWith("/externalLink")) return "";
+      return tag;
+    })
+  );
+
+  // 3) [Content_Types].xml：删除其他 sheet 与 externalLink 的 Override
+  const ctFile = zip.file("[Content_Types].xml");
+  if (ctFile) {
+    const ctXml = await ctFile.async("string");
+    const firstPartName = "/xl/" + firstTarget; // 如 /xl/worksheets/sheet1.xml
+    zip.file(
+      "[Content_Types].xml",
+      ctXml.replace(/<Override\b[^>]*?\/>/g, (tag) => {
+        const pn = /PartName="([^"]+)"/.exec(tag)?.[1] || "";
+        if (pn.startsWith("/xl/worksheets/") && pn !== firstPartName) return "";
+        if (pn.startsWith("/xl/externalLinks/")) return "";
+        return tag;
+      })
+    );
+  }
+
+  // 4) 删除其余 sheet 与 externalLink 的实体文件（保留第一个 sheet 及其 rels）
+  const firstSheetRels = "xl/worksheets/_rels/" + firstTarget.split("/").pop() + ".rels";
+  for (const name of Object.keys(zip.files)) {
+    if (/^xl\/worksheets\/sheet\d+\.xml$/.test(name) && name !== "xl/" + firstTarget) {
+      zip.remove(name);
+    } else if (/^xl\/worksheets\/_rels\/sheet\d+\.xml\.rels$/.test(name) && name !== firstSheetRels) {
+      zip.remove(name);
+    } else if (/^xl\/externalLinks\//.test(name)) {
+      zip.remove(name);
+    }
+  }
+
+  const out = await zip.generateAsync({ type: "nodebuffer" });
+  return Buffer.isBuffer(out) ? out : Buffer.from(out);
+}
+
+// ============================================================
 // 主入口
 // ============================================================
 
@@ -529,9 +624,12 @@ export async function convertYanxunToEtton(
   filePath: string,
   sourceFileName: string,
 ): Promise<YanxunConvertResult> {
-  // ── 1. 读取延讯发票 ──
+  // ── 1. 读取延讯发票(只解析发货单 sheet，跳过隐藏的 VLOOKUP 数据源表，避免大文件 OOM) ──
+  const srcBuffer = await loadFirstSheetOnly(filePath);
   const srcWb = new ExcelJS.Workbook();
-  await srcWb.xlsx.readFile(filePath);
+  // ExcelJS 的 load 参数 `Buffer` 是它自声明的 `interface Buffer extends ArrayBuffer`（类型 hack），
+  // 与 Node 的 Buffer<ArrayBufferLike> 结构不兼容，这里断言绕过（运行时内部走 jszip，Node Buffer 完全可用）。
+  await srcWb.xlsx.load(srcBuffer as unknown as Parameters<typeof srcWb.xlsx.load>[0]);
 
   const srcSheet = srcWb.worksheets[0]; // 发货单(第一个 sheet)
   if (!srcSheet) throw new Error("延讯发票中没有找到工作表");
