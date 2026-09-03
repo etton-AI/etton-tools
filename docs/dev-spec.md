@@ -707,7 +707,7 @@ interface PacificSplitResult {
 
 20. **TR入仓历史库无持久卷，pod 重启即丢失** (2026-09-01)
     - `data/history.json` 写入容器文件系统（`runAsNonRoot: true`、无 PVC 挂载），K8s pod 重启/重建后历史库清零
-    - **缓解**: 前端提供「导入/导出历史库」按钮，重要历史数据需手动导出备份（.xlsx），重启后重新导入
+    - **缓解**: 前端提供「导入/导出历史库」按钮，重要历史数据需手动导出备份（.xlsx），重启后重新导入；2026-09-03 起 `loadHistory()` 在 `history.json` 不存在时回退到内置 66 条种子数据（见 #41）
     - **位置**: `warehouse-entry.ts` `HISTORY_FILE()`（`process.cwd()/data/history.json`）；`data/` 已加入 `.gitignore`
 
 21. **TR入仓历史对比方向按业务语义实现为「历史最大 > 建议值」才提示放大** (2026-09-01)
@@ -845,6 +845,12 @@ interface PacificSplitResult {
     - 坑：若沿用「取更大者」，最终值比自动累积建议值小时会被忽略，导致历史库始终记住偏大的建议值
     - 同时支持导入**单组格式**《…出给客户的.xlsx》（仅一组 长/宽/高/实重/材积重，无「客户/出给客户」分组）——`pickGroupCols` 对单组列 `hits[0]` 与 `hits[last]` 指向同一列，客户标识回填为最终值
     - 位置：`warehouse-entry.ts` `upsertHistoryEntry()` + `importHistoryFromExcel()`；`api/warehouse-entry/history/route.ts`
+
+41. **TR入仓历史库内置 66 条种子数据（K8s 无持久卷兜底）** (2026-09-03)
+    - 背景：历史库 `data/history.json` 运行时写入且被 `.gitignore` 忽略，K8s 无持久卷，pod 重启即清零（见 #20），线上默认是空库
+    - 做法：把历史库重建结果 66 条生成为 `src/lib/history-seed.ts`（`HISTORY_SEED: HistoryEntry[]`，打进镜像），`loadHistory()` 在 `history.json` 不存在时返回 `HISTORY_SEED.map(e => ({...e}))` 兜底；一旦运行时 `accumulateHistory` 累积后写文件，仍优先读文件
+    - 数据来源：66 条 = 《拓锐入仓数据参考(1).xlsx》(58 条) + 《拓锐8.29出货1989件入仓数据（做为历史参考）.xlsx》(31 条) 按同款判定（品名+排序尺寸差≤1cm+实重差≤1kg）去重后全集
+    - 位置：`src/lib/history-seed.ts`（种子）+ `warehouse-entry.ts` `loadHistory()` 兜底分支
 
 ### 待重构项
 

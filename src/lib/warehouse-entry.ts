@@ -25,6 +25,7 @@
 import ExcelJS from "exceljs";
 import fs from "fs";
 import path from "path";
+import { HISTORY_SEED } from "./history-seed";
 
 // ============================================================
 // 常量
@@ -823,11 +824,11 @@ export function upsertHistoryEntry(
 const HISTORY_DIR = () => path.join(process.cwd(), "data");
 const HISTORY_FILE = () => path.join(HISTORY_DIR(), "history.json");
 
-/** 读取历史库（文件不存在返回空） */
+/** 读取历史库（文件不存在时返回内置种子数据，线上 K8s 无持久卷时兜底） */
 export function loadHistory(): HistoryLibrary {
   try {
     const p = HISTORY_FILE();
-    if (!fs.existsSync(p)) return [];
+    if (!fs.existsSync(p)) return HISTORY_SEED.map((e) => ({ ...e }));
     const raw = fs.readFileSync(p, "utf-8");
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) return parsed as HistoryLibrary;
