@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: etton-tools
-  namespace: ns-wqw6rrmf
+  namespace: ns-22nz9gjz
   labels:
     app: etton-tools
 spec:
