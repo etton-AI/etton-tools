@@ -801,13 +801,21 @@ function isSameHistoryProduct(a: CustomerIdentity, b: CustomerIdentity): boolean
   );
 }
 
-/** 将一条历史记录并入历史库：同款取计费重更大者，否则追加为新款 */
-export function upsertHistoryEntry(lib: HistoryLibrary, entry: HistoryEntry): void {
+/**
+ * 将一条历史记录并入历史库。
+ * 默认同款取计费重更大者（自动累积用，避免建议值把历史最大值压小）；
+ * 传入 `overwrite` 时，同款直接覆盖（手动导入「最终出给客户」数据用，以我们最终提供的值为准）。
+ */
+export function upsertHistoryEntry(
+  lib: HistoryLibrary,
+  entry: HistoryEntry,
+  opts?: { overwrite?: boolean }
+): void {
   const id = historyIdentity(entry);
   const idx = lib.findIndex((e) => isSameHistoryProduct(id, historyIdentity(e)));
   if (idx === -1) {
     lib.push(entry);
-  } else if (lib[idx].chargeableWeight < entry.chargeableWeight) {
+  } else if (opts?.overwrite || lib[idx].chargeableWeight < entry.chargeableWeight) {
     lib[idx] = entry;
   }
 }
@@ -887,9 +895,11 @@ export function accumulateHistory(rows: SuggestionRow[]): HistoryLibrary {
 }
 
 /**
- * 从历史 Excel（参考文件《拓锐入仓数据参考》等）提取历史产品。
- * 参考文件含「客户的 / 出给客户」两组列：客户组（长宽高实重）用于同款判定，
- * 出给客户组（长宽高实重材积重）用于历史最大值对比。
+ * 从历史 Excel 提取历史产品。支持两种格式（按列自动识别）：
+ * 1. 双组格式（参考文件《拓锐入仓数据参考》等）：含「客户的 / 出给客户」两组列，
+ *    客户组（长宽高实重）用于同款判定，出给客户组（长宽高实重材积重）用于历史最大值对比；
+ * 2. 单组格式（《…出给客户的.xlsx》最终数据）：仅一组「长/宽/高/实重/材积重」列，
+ *    该组即「最终提供给客户」的值，同款判定与历史最大值都用同一组（客户标识回填为最终值）。
  */
 export async function importHistoryFromExcel(filePath: string): Promise<HistoryLibrary> {
   const wb = new ExcelJS.Workbook();

@@ -218,7 +218,7 @@ export default function WarehouseEntryPage() {
           return;
         }
         setHistoryCount(data.totalCount);
-        setNotice(`历史库已导入 ${data.importedCount} 条，当前共 ${data.totalCount} 条`);
+        setNotice(`已用最终「出给客户」数据更新历史库 ${data.importedCount} 条（覆盖同款），当前共 ${data.totalCount} 条`);
       } catch {
         setError("历史库导入失败，请重试");
       } finally {
@@ -391,9 +391,10 @@ export default function WarehouseEntryPage() {
                 历史库 <span className="font-medium text-zinc-700">{historyCount}</span> 条
               </p>
             </div>
-            <div className="flex flex-wrap gap-3">
+            <div className="flex flex-wrap items-center gap-3">
               <button
                 onClick={() => historyInputRef.current?.click()}
+                title="支持导入「最终出给客户」的 Excel（如《…出给客户的.xlsx》）或历史参考文件，同款将覆盖为最终值"
                 className="inline-flex items-center gap-2 rounded-lg border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-50 transition-colors"
               >
                 导入历史库

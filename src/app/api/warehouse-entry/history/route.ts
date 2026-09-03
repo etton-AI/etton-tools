@@ -42,10 +42,11 @@ export async function POST(request: NextRequest) {
 
     try {
       const imported = await importHistoryFromExcel(tmpPath);
-      // 与现有历史库合并：同款（品名 + 客户箱规/实重相近）取计费重更大者
+      // 与现有历史库合并：同款（品名 + 客户箱规/实重相近）直接覆盖。
+      // 导入的是「最终出给客户」数据，以我们最终提供的值为准（覆盖自动累积的建议值）。
       const existing = loadHistory();
       for (const entry of imported) {
-        upsertHistoryEntry(existing, entry);
+        upsertHistoryEntry(existing, entry, { overwrite: true });
       }
       saveHistory(existing);
 
