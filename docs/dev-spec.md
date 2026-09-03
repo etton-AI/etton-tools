@@ -833,6 +833,12 @@ interface PacificSplitResult {
     - 坑：文件带第二个 sheet「TRKJ26080107」（某 SO 的重复明细），仅读 `worksheets[0]` 避免重复计数
     - 位置：`warehouse-entry.ts` `SUPPLIER_HEADQUARTERS_PATTERNS` + `parseSupplierFile()` 表头检测/格式检测/数据过滤
 
+39. **TR入仓历史库导入误取「总」汇总列（总实重/总材积重）** (2026-09-03)
+    - 背景：历史库从 40 列「内部三类数据」格式导入（`importHistoryFromExcel`），该格式含「总实重/总材积重」汇总列（值 = 单箱 × 总箱数），而 `pickGroupCols` 用 `t.includes(keyword)` 匹配关键字「实重/材积重」，导致「总实重」「总材积重」也被命中
+    - 坑：`pickGroupCols` 兜底取 `hits[hits.length - 1]`（最后一列）时，选中的是「总实重」(列 31) 而非单箱「实重」(列 29)，导致「出给客户」建议重量被读成总重量（曾出现 chargeableWeight = 590.85 / 751.67 等异常大值）
+    - 修复：匹配关键字时增加 `!t.startsWith("总")` 过滤，排除「总实重/总材积重/总计费重」等汇总列，只取单箱值；修复后 chargeableWeight 恢复正常（如 15.15 / 17.43，无 > 100 的异常值）
+    - 位置：`warehouse-entry.ts` `importHistoryFromExcel()` 的 `pickGroupCols`
+
 ### 待重构项
 
 - [ ] 将 session 存储从内存 Map 改为临时文件或 Redis

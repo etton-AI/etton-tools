@@ -908,7 +908,8 @@ export async function importHistoryFromExcel(filePath: string): Promise<HistoryL
     const hits: { col: number; text: string }[] = [];
     ws.getRow(headerRow).eachCell((cell, col) => {
       const t = cellText(cell);
-      if (t && t.includes(keyword)) hits.push({ col, text: t });
+      // 排除「总」开头的汇总列（总实重/总材积重/总计费重等），只取单箱值
+      if (t && t.includes(keyword) && !t.startsWith("总")) hits.push({ col, text: t });
     });
     const cust = hits.find((h) => h.text.includes("客户") && !h.text.includes("出给客户"));
     const sugg = hits.find((h) => h.text.includes("出给客户"));
