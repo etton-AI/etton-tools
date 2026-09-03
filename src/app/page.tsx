@@ -34,6 +34,12 @@ export default function HomePage() {
         >
           🧾 皮皮熊账单拆分
         </Link>
+        <Link
+          href="/yanxun-convert"
+          className="rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-emerald-500 transition-colors"
+        >
+          📄 延讯下单优化
+        </Link>
       </div>
     </div>
   );
