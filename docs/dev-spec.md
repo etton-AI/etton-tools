@@ -6,7 +6,7 @@
 
 ## 1. 项目概述与技术栈
 
-**ETTON 效率提升助手** — 基于 Next.js 的 Web 工具集，面向易通科技内部物流操作，提供保单投保区间拆分、太平洋货箱清单转换、多供应商对账引擎和皮皮熊账单拆分四个核心功能。
+**ETTON 效率提升助手** — 基于 Next.js 的 Web 工具集，面向易通科技内部物流操作，提供保单投保区间拆分、太平洋货箱清单转换、多供应商对账引擎、皮皮熊账单拆分、延讯下单优化五个核心功能。
 
 ### 技术栈
 
@@ -39,12 +39,14 @@ ETTON 电商AI/
 ├── k8s/
 │   └── deploy.yaml                   # K8s Deployment + Service + Ingress
 ├── public/
-│   └── output/                       # 历史测试输出（仅供开发参考）
-│       ├── 不足5000RMB.xlsx
-│       ├── 5000-10000RMB.xlsx
-│       ├── 10000-20000RMB.xlsx
-│       ├── 20000-30000RMB.xlsx
-│       └── 30000-40000RMB.xlsx
+│   ├── output/                       # 历史测试输出（仅供开发参考）
+│   │   ├── 不足5000RMB.xlsx
+│   │   ├── 5000-10000RMB.xlsx
+│   │   ├── 10000-20000RMB.xlsx
+│   │   ├── 20000-30000RMB.xlsx
+│   │   └── 30000-40000RMB.xlsx
+│   └── templates/
+│       └── 易通下单模版.xlsx          # 延讯下单优化的输出模板
 ├── src/
 │   ├── app/
 │   │   ├── layout.tsx                # 根布局：html lang=zh-CN + body 全局样式
@@ -60,6 +62,8 @@ ETTON 电商AI/
 │   │   │   └── page.tsx              # 多供应商对账引擎页面（17 家供应商）
 │   │   ├── pipixiong-split/
 │   │   │   └── page.tsx              # 皮皮熊账单拆分页面
+│   │   ├── yanxun-convert/
+│   │   │   └── page.tsx              # 延讯下单优化页面
 │   │   └── api/
 │   │       ├── split-insurance/
 │   │       │   └── route.ts          # POST 上传 + GET 下载（session 管理）
@@ -69,8 +73,10 @@ ETTON 电商AI/
 │   │       │   └── route.ts          # [旧] 单供应商对账 API
 │   │       ├── multi-supplier-reconciliation/
 │   │       │   └── route.ts          # POST 双文件上传 + GET 下载（多供应商）
-│   │       └── pipixiong-split/
-│   │           └── route.ts          # POST 上传 + GET 下载 ZIP
+│   │       ├── pipixiong-split/
+│   │       │   └── route.ts          # POST 上传 + GET 下载 ZIP
+│   │       └── yanxun-convert/
+│   │           └── route.ts          # POST 批量上传（多文件/ZIP）+ GET 下载（单票/ZIP）
 │   ├── components/
 │   │   └── Header.tsx                # Header (sticky) + Footer（同文件导出）
 │   └── lib/
@@ -78,7 +84,8 @@ ETTON 电商AI/
 │       ├── convert-pacific-insurance.ts  # 太平洋转换核心逻辑 (502 行)
 │       ├── reconciliation.ts         # [旧] 单供应商对账逻辑 (272 行)
 │       ├── multi-supplier-reconciliation.ts  # 多供应商对账引擎 (17家供应商配置，~870行)
-│       └── pipixiong-split.ts        # 皮皮熊拆分核心逻辑 (371 行)
+│       ├── pipixiong-split.ts        # 皮皮熊拆分核心逻辑 (371 行)
+│       └── yanxun-convert.ts         # 延讯下单优化核心逻辑（含 generateYanxunZip）
 ├── 保单拆分功能/                     # 原型/实验脚本（不参与构建）
 │   ├── split_insurance.js            # 原始 Node.js 拆分脚本
 │   ├── read_excel.js                 # Excel 读取调试脚本
@@ -102,11 +109,12 @@ ETTON 电商AI/
 
 **文件**: `src/app/page.tsx`
 
-纯展示型导航页，包含四个卡片链接：
+纯展示型导航页，包含五个卡片链接：
 - `/insurance-split` — 保单投保区间拆分
 - `/pacific-convert` — 太平洋货箱清单转换
 - `/multi-supplier-reconciliation` — 多供应商对账引擎
 - `/pipixiong-split` — 皮皮熊账单拆分
+- `/yanxun-convert` — 延讯下单优化
 
 无服务端逻辑，纯客户端渲染。
 
@@ -465,6 +473,123 @@ interface PacificSplitResult {
 
 ---
 
+### 3.12 延讯下单优化 — `/yanxun-convert`
+
+**文件**: `src/app/yanxun-convert/page.tsx` + `src/lib/yanxun-convert.ts` + `src/app/api/yanxun-convert/route.ts`
+
+#### 功能
+
+1. 上传延讯下单发票 Excel（发货单 sheet，即第一个 sheet）；支持**批量多选**或**上传 ZIP 包**（一次处理几十票）
+2. 自动提取顶部信息：运输方式、正式报关、带电、目的地、渠道、FBA号/海外仓、调拨单号、ReferenceID、总箱数
+3. 解析货箱清单（箱号/品名/英文/材质/用途/发货数量/申报货值/海关编码/毛重/长宽高/币种）
+4. 映射填充到易通下单模版（`public/templates/易通下单模版.xlsx`）的顶部字段 + 数据区
+5. 输出文件按「`ETTON_FBA号`（FBA 场景）/ `ETTON_调拨单号`（海外仓场景）」命名（如 `ETTON_FBA19MX7M8KR.xlsx` / `ETTON_TF2608270070.xlsx`），支持**单票下载**或**打包 ZIP 下载**（含 `转换结果汇总.json`，重名自动加 `_2` 后缀）
+
+**批量处理流程**:
+- 前端 `input multiple` / 拖拽多文件 → `formData.append("files", f)` 逐个追加
+- 后端 POST 遍历 `formData.getAll("files")`；`.zip` 先 `JSZip` 解压提取内部 `.xlsx/.xls`（跳过 `.`/`~$` 临时文件），单个文件失败记录到 `failed[]` 不中断整体
+- GET `?file=all.zip` 打包全部成功结果；`?file=<文件名>` 下载单票
+
+#### 核心逻辑 (`src/lib/yanxun-convert.ts`)
+
+**导出函数**:
+- `convertYanxunToEtton(filePath, sourceFileName)` → `YanxunConvertResult`
+
+**顶部字段映射**（延讯发货单 → 易通模版）:
+
+| 延讯字段 | 易通字段 | 易通位置 |
+|---------|---------|---------|
+| 运输方式 | 业务类型 | B6 |
+| 正式报关 | 报关方式 | B8 |
+| 带电 | 带电 | F2（否则不填） |
+| 目的地（第 1 个） | 收件人国家 | F9（仅 FBA 场景） |
+| 目的地（第 2 个） | 仓库代码 | F10（仅 FBA 场景） |
+| 目的地（地址文本） | 私人地址/海外仓 | F14~F22（仅海外仓场景，解析收件人姓名/公司/国家/城市/州/邮编/联系方式/地址） |
+| 渠道 | 备注 | B21 |
+| FBA号/海外仓（是否含「海外仓」） | 仓点类型 | F7/F8（FBA 场景填 FBA；海外仓场景清空该组走「私人地址/海外仓」） |
+| FBA号 / 调拨单号 | 文件名 | —（FBA 场景 `ETTON_FBA号.xlsx`，海外仓场景 `ETTON_调拨单号.xlsx`） |
+| ReferenceID | 货件追踪编码 | 数据区 c2（FBA 场景）；`/`（海外仓场景，无追踪编码） |
+| 总箱数 | 总箱数 | B18 |
+
+**报关方式映射**:
+- `公司自报` → `普通报关`（买单）
+- `永德吉报关` → `报关退税`
+- `否` → `普通报关`（买单）
+
+**货箱清单列映射**（延讯箱单 → 易通 24 列数据区）:
+- `箱号` → Shipment ID；`英文` → Name(En)；`品名` → Name(Ch)；`材质` → Material；`用途` → Use
+- `发货数量` → Quantity；`申报货值` → Unit Price；`数量×单价` → Total Price（保留完整精度，不四舍五入）；`币种` → currency（FBA 场景从「币种」列取；海外仓备货单无币种列，默认 `USD`）
+- `海关编码` → HS Code；`brand`/`Model`/`Brand Type` → 无；`毛重` → 净重&毛重；`长/宽/高` → 尺寸
+- `ReferenceID`（顶部） → Reference ID（FBA 场景取顶部 ReferenceID；海外仓场景填 `/`）；`链接` → 链接（无数据填 `0`）；`图片` → `0`；`是否申报`/`申报数量` → 留空
+
+**表头自动检测**:
+- 延讯箱单表头行：扫描前 60 行，定位同时含「箱号」+「发货数量」的行
+- 列映射：基于表头关键词 `startsWith` 匹配（长/宽/高用「长（」「宽」「高」前缀避免误匹配「超围长」）
+
+**混箱处理**:
+- 同一箱号出现多行 = 混箱
+- 仅首行保留毛重/长宽高（Number 列首行=1），其余行 Number/净重/毛重/长/宽/高 **补 `0`**（不留空白）
+- 避免导入系统时把混箱当作新的一箱货；补 0 保证下游导入不因空值报错
+
+**预计总重量/总体积**:
+- 总重量 = 各箱毛重合计（混箱仅首行计入）；总体积 = 各箱「体积CBM」列合计（混箱仅首行计入），自动填充 B19/B20
+- 体积用延讯「体积CBM」列（每箱已 ROUND 到 2 位），而非直接 长×宽×高 计算，避免与标准答案的取整差异
+
+**必填项校验**:
+- 转换前校验 运输方式/正式报关/渠道，缺失时抛错（批量场景记录到 `failed[]`）
+- **FBA 场景**额外校验 目的地国家/仓库代码/FBA号（缺失报「无目的地国家/无仓库代码/无FBA号」）
+- **海外仓场景**额外校验 收件人姓名/地址/调拨单号（缺失报「无收件人姓名/无收件人地址/无调拨单号」）
+- 渠道从「物流商/渠道」标签右侧多格扫描，跳过含「发件人/地址/邮编/收件/电话」的地址类文本，缺失报「无渠道名」，不 fallback、不误填发件人地址
+- 二选一必填组：`仓点类型+收件人国家+仓库代码`（FBA 地址库）与「私人地址/海外仓」二选一；场景判断依据为「FBA号/海外仓」字段值是否含「海外仓」——FBA 场景走第一组（仓点类型=FBA），海外仓场景清空第一组、走第二组（从「目的地」地址文本自动解析收件人信息并填入）
+- 模板自带默认值：发货公司、是否合并报关，无需处理
+- **服务渠道（B7）延讯无法自动映射** → 不做校正、不提示（延讯渠道名与易通服务渠道名非一一对应，由人工选定）
+
+---
+
+### 3.13 TR入仓数据整理 — `/warehouse-entry`
+
+**文件**: `src/app/warehouse-entry/page.tsx` + `src/lib/warehouse-entry.ts` + `src/app/api/warehouse-entry/route.ts`（含 `/export`、`/history` 子路由）
+
+#### 功能
+
+1. 上传**客户数据**（一行一个产品）+ **供应商数据**（逐箱），自动匹配选数、校验报警，生成「出给客户」建议箱规
+2. 前端**可编辑**建议长/宽/高/实重（实时重算材积重/计费重/三边和），**全局校验条**提示「出给客户总计费重 − 供应商总计费重」
+3. 导出《出给客户.xlsx》，并**自动累积历史库**；支持历史库导入/导出备份
+4. **导出格式对齐参考文件《拓锐…入仓数据（成本）.xlsx》**：表头两行（分组 + 列名）、三组并排对比（客户的 / 供应商 / 出给客户）、派生列用 Excel 公式（材积重/总重/计费重/差异）以便人工调整尺寸后自动重算；系统SO/客户渠道/国家/仓库代码/单证报关 从客户数据自动取数，出货日期/成本KG/渠道/总成本重 等无来源列留空供人工填写
+
+#### 核心业务规则
+
+- **产品唯一键** = 品名 + 长 + 宽 + 高 + 实重；**历史库同款判定** = 品名一致 且 客户长宽高**排序后**逐边差 ≤ 1cm 且 实重差 ≤ 1kg（同款取计费重更大者；仅品名相同但箱规/重量差异更大 → 视为不同产品，不参与历史对比；排序是为了忽略长宽高书写顺序差异）
+- **FBA 匹配**：客户 FBA 12 位；供应商按格式取「U+流水号」前的值（`FBA19MYJ057TU000001` → `FBA19MYJ057T`，比固定取前 12 位更健壮）——
+  - **天图格式**：`货箱编号`（`FBA15M8F4YZR` + `U000001`）
+  - **英美入仓格式**：`扩展箱号`（`FBA19MYJ057T` + `U000001`）；箱规列 = `货箱重量(BI)/货箱长度(BJ)/货箱宽度(BK)/货箱高度(BL)/货箱材积重(BM)`，**忽略该表客户数据，只看 BI~BM**。自动检测：表头含「扩展箱号」即按此格式解析
+- **客户数据三格式**：标准（一行一产品，`实重`列）、易通发票（表单头+明细表，`FBA货箱编号/中文品名/箱数件数/货箱重量/长宽高`）、货箱清单（表单头「货箱清单」+明细表，`FBA ID/中文品名/总箱数(CTN)/长宽高/单箱货物毛重`）。自动检测：表头含「FBA货箱编号」→ 发票格式（「货箱重量」→ 实重）；含「单箱货物毛重」→ 货箱清单格式（「单箱货物毛重」→ 实重）；否则标准格式
+- **材积重** = 长×宽×高 ÷ 6000；**计费重** = `max(实重, 材积重)`，按计费重降序
+- **箱规匹配**：长宽高向下取整后相等；**实重容差** ≤ 0.3kg 视为同产品
+- **选数**（按历史参考值决定第 1/第 2 大）：有历史同款时 供应商第 1 大计费重 ≤ 历史最大计费重 → 取第 1 大，否则退取第 2 大；新品（无历史）取第 2 大（避免偶发偏大的异常箱）；仅 1 箱回退第 1 大
+- **建议值** = 选中箱规长宽高 + 该箱规所有箱最大实重 + 公式材积重
+- **出给客户 = 供应商选数箱规 + 最短边 +1**（放大最短边作安全余量，尽量不放大最大边）：尺寸 = 选中箱长宽高再放大最短边 +1；实重 = 该箱规所有箱最大实重；材积重 = 公式重算；计费重 = `max(实重, 材积重)`。放大约束：放大后材积重 − 客户材积重 `< 2`、计费重不超过历史最大计费重，任一不满足则不放大（退回供应商原尺寸）。例：供应商 `54×53×36`、客户 `51.5×51.5×36` → 最多 `54×53×37`
+- **差异约束（对比客户申报）**：三边和差必须 `< 6`、材积重差必须 `< 2`；超限 → 报警并提示找供应商核查过机图，核实后再修改
+- **参考优先级**：历史有数据用历史参考；有供应商数据用供应商数据参考（供应商实测为准）。供应商数据明显偏大（如 51/51/51 vs 客户 49/49/49，三边和差 ≥ 6）→ 仍采用供应商数据，但标红要求核查过机图
+- **全局兜底校验**：导出前 Σ出给客户总计费重 > Σ供应商总计费重，否则等比例放大并标 `[全局调整]`（`AMPLIFY_RATIO = 1.02`）
+- **报警阈值**（供应商**原始箱规** vs 客户，区分材积/实重主导）：**材积主导**（供应商体积重 ≥ 实重）→ 三边和差 ≥ 6、材积重差 ≥ 2；**实重主导**（供应商体积重 < 实重）→ 实重差 ≥ 0.5；另有 供应商过大箱（最大材积重 − 建议材积重 ≥ 2）、历史最大值 > 建议值（建议参考历史最大值放大）、未匹配 → `⚠需人工复核`。编辑建议值后前端 `recomputeAlarms` 实时重算（与后端口径一致）
+
+#### 核心逻辑 (`src/lib/warehouse-entry.ts`)
+
+**导出函数**: `parseCustomerFile` / `parseSupplierFile` / `buildSuggestions` / `exportOutputBuffer` / `loadHistory` / `saveHistory` / `accumulateHistory` / `importHistoryFromExcel` / `exportHistoryBuffer`
+
+**导出列位**（40 列，与参考文件对齐）：A 出货日期 · B 系统SO · C 客户渠道 · D 国家 · E 仓库代码 · F 单证报关 · G FBA ID · H 中文品名 · I 总箱数 · J–N 客户长/宽/高/实重/材积重 · P 差异 · Q–W 供应商长/宽/高/实重/材积重/总实重/总材积重 · Y 差异 · Z–AH 出给客户长/宽/高/实重/材积重/总实重/总材积重/计费重/总计费重 · AI 成本KG · AJ 备注(报警) · AK 渠道 · AL 箱数 · AM 总计费重 · AN 总成本重。`SuggestionRow.supplier` 记录选数命中的供应商代表箱（未匹配时全 0），供「供应商」对比列输出。`SuggestionRow.so/channel/country/warehouse/customs` 五个客户元信息字段从客户数据自动取数（列名匹配：系统SO/客户渠道/国家/仓库代码/单证报关），写入 B–F 列。
+
+**复用**: `cellText` / `cellNum` 安全读单元格逻辑（与 `yanxun-convert.ts` 同款实现）
+
+#### API
+
+- `POST /api/warehouse-entry`：上传两文件 → `{ rows, supplierTotal, summary }`
+- `POST /api/warehouse-entry/export`：body `{ rows, supplierTotal }` → 下载 Excel（导出前全局兜底、导出后累积历史库）
+- `GET /api/warehouse-entry`：读取历史库；`POST/GET /api/warehouse-entry/history`：导入/导出历史库
+
+---
+
 ## 4. 非目标（明确没做的）
 
 - ❌ **用户认证/登录**: LAN 工具，无权限控制
@@ -528,6 +653,185 @@ interface PacificSplitResult {
    - **症状**: 网站不可访问，`kubectl get deploy` 找不到 etton-tools
    - **修复命令**: `kubectl apply -f k8s/deploy-sealos.yaml`
    - **恢复脚本**: 项目根目录 `redeploy.sh`
+
+10. **延讯发票 sheet 名带尾随空格** (2026-08-28)
+    - 延讯发货单 sheet 名为 `"发货单 "`（含尾随空格），直接按名称匹配会失败
+    - **绕过**: 延讯转换固定用 `wb.worksheets[0]` 定位发货单，不依赖 sheet 名
+    - **位置**: `yanxun-convert.ts` `convertYanxunToEtton()`
+
+11. **易通模板数据区示例数据需先删除** (2026-08-28)
+    - 易通模版 R25 起预置 5 行示例数据（Night light），需 `spliceRows` 删除后写入真实数据
+    - **注意**: 删除后新数据行无边框，需统一补 `thin` 边框（24 列）；删除行数须用 `actualRowCount`（见坑 #22），不能用 `rowCount`
+    - **位置**: `yanxun-convert.ts` 数据区填充逻辑
+
+12. **延讯「带电」字段为否时不填** (2026-08-28)
+    - 需求规则「带电（不带电就不填）」，易通模版 F2 下拉为「是,否」，默认留空
+    - 仅当延讯带电值为「是」或「带电」时才写「是」
+    - **报关方式映射**: 公司自报→普通报关、永德吉报关→报关退税（`CUSTOMS_MAP`，可扩展）
+
+13. **批量 ZIP 打包重名处理** (2026-08-28)
+    - 多票导入文件可能同名（如不同目录下同名文件），ZIP 内同名文件会覆盖
+    - **绕过**: `generateYanxunZip()` 用 `nameCount` Map 计数，重名自动加 `_2`/`_3` 后缀（`原名_ETTON.xlsx` → `原名_ETTON_2.xlsx`）
+    - **位置**: `yanxun-convert.ts` `generateYanxunZip()`
+
+14. **延讯渠道缺失会误填发件人地址** (2026-08-28)
+    - 延讯发票未写渠道时，「物流商/渠道」标签右侧为空，旧的 fallback/大范围 `valueRight` 会扫到「发件人地址」标签，把地址误填进易通「备注」
+    - **修复**: 渠道只取「物流商/渠道」标签右侧 1~2 格；扫不到即报「无渠道名」，并用 `/发件人|地址|邮编/` 正则兜底过滤
+    - **位置**: `yanxun-convert.ts` `parseTopInfo()` + `validateTopInfo()`
+
+15. **混箱后续行须补 0 而非空白** (2026-08-28)
+    - 易通标准答案中混箱后续行的 Number/净重/毛重/长/宽/高 均为 `0`，而非空值；空值会导致下游导入报错
+    - **修复**: 数据区填充时混箱后续行统一写 `0`
+    - **位置**: `yanxun-convert.ts` 数据区填充逻辑
+
+16. **预计总体积须用「体积CBM」列** (2026-08-28)
+    - 直接用 长×宽×高/1000000 会得到 0.4566，而标准答案为 0.45（各箱「体积CBM」列 ROUND 到 2 位后求和）
+    - **修复**: 新增 `volumeCbm` 列映射（表头关键词「体积」），预计总体积 = 各箱「体积CBM」合计
+    - **位置**: `yanxun-convert.ts` `YANXUN_HEADER_PATTERNS` + 预计总体积计算
+
+17. **场景判断依据为「FBA号/海外仓」字段，海外仓须自动填「私人地址/海外仓」** (2026-08-28)
+    - 易通「仓点类型」下拉为 `FBA,Walmart` 二选一，且「私人地址/海外仓」与 FBA 地址库组二选一
+    - **规则**: 场景判断依据是「FBA号/海外仓」字段值是否含「海外仓」字眼（不是「目的地」字段）——含 → 海外仓场景（清空 FBA 地址库组 R7~R12，从「目的地」地址文本解析收件人姓名/公司/地址/电话/城市/州/邮编并填到「私人地址/海外仓」R14~R22），否则 → FBA 场景（填 FBA + 校验 FBA号）
+    - **位置**: `yanxun-convert.ts` `parseTopInfo()`（`warehouseType` 字段 + `parseOverseasAddress()`） + `convertYanxunToEtton()`
+
+18. **输出文件名改为「ETTON_FBA号 / ETTON_调拨单号」命名** (2026-08-28)
+    - 海外仓场景没有 FBA号，须用「调拨单号」命名；FBA 场景用 FBA号 命名，两者统一加 `ETTON_` 前缀
+    - **修复**: 文件名 = FBA 场景 `ETTON_FBA号.xlsx`（如 `ETTON_FBA19MX7M8KR.xlsx`），海外仓场景 `ETTON_调拨单号.xlsx`（如 `ETTON_TF2608270070.xlsx`）；`sanitizeFileName` 清洗非法字符，缺失时 fallback「未命名」
+    - **位置**: `yanxun-convert.ts` `convertYanxunToEtton()` 文件名生成
+
+19. **`.next` 编译缓存损坏导致核心 JS chunk 404、React 交互全失效** (2026-09-01)
+    - 症状：页面能正常显示（SSR HTML），`<label>` 原生触发文件框也正常，但所有 React 合成事件（onChange/onDragOver/onDrop/onClick）都失效——文件名不显示、拖拽边框不变绿、状态不更新
+    - 根因：`polyfills.js` / `main-app.js` / `app-pages-internals.js` 等核心 chunk 返回 404，React 在浏览器根本没加载
+    - 修复：停止 dev server → `rm -rf .next` → 重新 `npm run dev`，重新编译后 chunk 全部 200
+    - 教训：排查「原生 HTML 行为正常、React 交互全失效」时，先 curl SSR HTML 里的 script 引用确认 JS chunk 是否 404，不要只在业务代码里找 bug
+
+20. **TR入仓历史库无持久卷，pod 重启即丢失** (2026-09-01)
+    - `data/history.json` 写入容器文件系统（`runAsNonRoot: true`、无 PVC 挂载），K8s pod 重启/重建后历史库清零
+    - **缓解**: 前端提供「导入/导出历史库」按钮，重要历史数据需手动导出备份（.xlsx），重启后重新导入
+    - **位置**: `warehouse-entry.ts` `HISTORY_FILE()`（`process.cwd()/data/history.json`）；`data/` 已加入 `.gitignore`
+
+21. **TR入仓历史对比方向按业务语义实现为「历史最大 > 建议值」才提示放大** (2026-09-01)
+    - 原始规格文字写「历史最大计费重 < 建议值 → 报警放大」，与规则 6「选了最大还比历史小则放大」语义矛盾
+    - **实现**: 采用「历史最大计费重 **>** 建议值 → 提示『建议参考历史最大值放大』」（建议值偏小时才有放大空间），与规则 6 一致
+    - **位置**: `warehouse-entry.ts` `buildSuggestions()` 历史对比分支
+
+22. **延讯转换：`spliceRows` 删模板示例行须用 `actualRowCount` 而非 `rowCount`** (2026-09-02 修复)
+    - 症状：转换 FBA19NFKCR3S（源文件仅 3 箱）后，输出文件底部多出 2 行 `FBA19MXX2JCWU000004/005`（Night light）——是模板 R28/R29 的示例数据没删干净
+    - 根因：exceljs 的 `rowCount` 把模板带格式的空行也算进去（本例 =53），而实际有数据的行是 `actualRowCount`=29。旧代码 `rowsToDelete = rowCount - 25 + 1 = 29`，使 `spliceRows` 内部 `nKeep = start + count = 54 > 实际行数`，删除循环一次都不执行（静默失败，不报错）
+    - 修复：`rowsToDelete = outSheet.actualRowCount - dataStartRow + 1`（=5），只删 R25~R29 这 5 行示例数据
+    - 位置：`yanxun-convert.ts` `convertYanxunToEtton()` 数据区删除逻辑
+
+23. **延讯「币种」列常是公式且查不到值，`cellText` 会把错误对象转成 `[object Object]`** (2026-09-02 修复)
+    - 症状：加拿大 FBA 发货的币种列 C33 是 `VLOOKUP(...,英欧链接价格!H:Q,9,0)`，查不到返回 `result: { error: "#N/A" }`；旧 `cellText` 对 `result` 直接 `String()` → `[object Object]`，导致输出币种列变成 `[object Object]`，`|| "USD"` 回退失效
+    - 修复：`cellText` 对公式 `result` 分支只接受 string/number/boolean，错误对象（`{error:"#N/A"}` 等）返回空字符串 → 币种 `"" || "USD"` 正确回退 `USD`（美加等美元区默认）
+    - 位置：`yanxun-convert.ts` `cellText()`
+
+24. **TR入仓供应商「英美入仓」格式的 FBA 在「扩展箱号」列，不是「货箱编号」列** (2026-09-02)
+    - 症状：若沿用天图格式的 `fbaId: ["货箱编号"]`，会误匹配到英美入仓格式里的「货箱编号」列（该列实为运单号 `10593316U001`，非 FBA），导致 FBA 提取错误
+    - 根因：英美入仓格式（如 `TRKJ26080105-英美入仓数据.xlsx`）中「货箱编号」= 运单号，真正的逐箱 FBA 在「扩展箱号」列（`FBA19MYJ057TU000001` → 前 12 位）；箱规在 货箱重量/长度/宽度/高度/材积重（BI~BM）
+    - 修复：新增 `SUPPLIER_ENTRY_PATTERNS`（`fbaId: ["扩展箱号"]` 等精确列名），`parseSupplierFile()` 通过「表头是否含『扩展箱号』」自动切换两套模式
+    - 位置：`warehouse-entry.ts` `SUPPLIER_ENTRY_PATTERNS` + `parseSupplierFile()` 格式检测分支
+
+25. **TR入仓客户「易通发票」格式的重量在「货箱重量」列，且「品名」会误命中「英文品名」** (2026-09-02)
+    - 症状：若沿用标准 `CUSTOMER_PATTERNS`，易通发票（`8月第4周（易通发票）...xlsx`）的实重列读成 0（标准模式只认「实重」），且品名取到「英文品名」而非「中文品名」
+    - 根因：易通发票是「表单头 + 明细表」结构，明细表中文表头为 `FBA货箱编号/英文品名/中文品名/箱数件数/货箱重量/长宽高`；「货箱重量」= 实重，「品名」兜底会先命中靠前的「英文品名」列
+    - 修复：新增 `CUSTOMER_INVOICE_PATTERNS`（`fbaId:["FBA货箱编号"]`、`productName:["中文品名"]`、`actualWeight:["货箱重量"]` 等精确列名），`parseCustomerFile()` 通过「表头是否含『FBA货箱编号』」自动切换；无「材积重」列时按公式重算
+    - 位置：`warehouse-entry.ts` `CUSTOMER_INVOICE_PATTERNS` + `parseCustomerFile()` 格式检测分支
+
+26. **TR入仓导出格式对齐参考文件《拓锐…入仓数据（成本）》——三组并排 + 公式列** (2026-09-02)
+    - 背景：用户要求导出「按照参考文件格式输出，方便人工参考调整」，参考文件为 40 列、表头两行（分组 `客户的(J1:N1)` / `供应商(Q1:W1)` / `出给客户(Z1:AD1)` + 列名）、三组数据并排
+    - 关键点：派生列（材积重/总实重/总材积重/计费重/差异）写成 **Excel 公式**（如 `=J3*K3*L3/6000`、`=ROUND(MAX(AE3,AF3),0)`），这样人工改动尺寸后能自动重算；而非写死数值
+    - 无来源列留空：出货日期/成本KG/渠道/总成本重 是人工业务字段，工具不产生，导出时空列占位供人工填写（2026-09-03 起 系统SO/客户渠道/国家/仓库代码/单证报关 已改为从客户数据自动取数，见 #33）；备注列(AJ，无表头)放报警文案
+    - 新增字段：`SuggestionRow.supplier`（选数命中的供应商代表箱原始值，未匹配时全 0），供「供应商」对比列输出；`buildSuggestions()` 三处 push 均需填充该字段，漏填会导致导出「供应商」列空白
+    - 位置：`warehouse-entry.ts` `exportOutputBuffer()`（列位常量 `C` + `colLetter` 公式拼接）+ `SupplierRepresentative` 接口
+
+27. **TR入仓「实重主导」单行校验改用 0.4 上限，取代 ×1.02 放大** (2026-09-02)
+    - 规则：当 `实重 > 材积重`（计费重由实重主导）时，建议实重 = `max(供应商最大实重, 历史最大实重)`，上限 `≤ 客户实重 + 0.4`（`ACTUAL_CAP_TOLERANCE`）；材积主导仍保留 `×1.02` 放大
+    - 判定口径：`suggestion.actualWeight > suggestion.volumeWeight`（选数命中箱规的最大实重 > 公式材积重）即视为实重主导，与 `forceAmplify()` 内部 `volumeWeight >= actualWeight` 分支互补
+    - 坑：客户实重为 0（缺失）时上限无意义 → 用 `Infinity` 跳过封顶；历史库该品名用 `actualWeight`（非 chargeableWeight）参与取 max，避免材积主导历史把实重虚高
+    - 位置：`warehouse-entry.ts` `buildSuggestions()` 单行校验分支 + `ACTUAL_CAP_TOLERANCE` 常量
+
+28. **TR入仓历史库「同款」按客户箱规/实重相近判定，不再按品名去重** (2026-09-02)
+    - 规则：同名产品（如「水波纹灯」）可能对应多款不同规格，仅品名一致不足以判定同款。改为：品名一致 且 客户长宽高**排序后**逐边差 ≤ 1cm 且 实重差 ≤ 1kg → 同款；否则视为不同产品，不参与历史对比。排序是为了让「同一款箱的长宽高书写顺序不同」（如 `39.6×39.6×43.8` vs `43.8×39.6×39.6`）不被误判成两款
+    - 数据：`HistoryEntry` 拆成「客户申报（`customerLengthCm/WidthCm/HeightCm/customerActualWeight`，用于同款判定）」+「出给客户建议（`lengthCm/.../chargeableWeight`，用于历史最大实重/计费重对比）」两组字段；历史库由 `Record<品名, ...>` 改为扁平数组 `HistoryLibrary = HistoryEntry[]`
+    - 匹配/去重统一走 `isSameHistoryProduct()` + `upsertHistoryEntry()`（同款取计费重更大者）；`buildSuggestions()` 用 `history.filter(isSameHistoryProduct)` 取同款历史，分别取 max 实重（实重主导用）与 max 计费重（历史对比报警用）
+    - 导入：`importHistoryFromExcel()` 用 `pickGroupCols()` 区分「客户组 / 出给客户组」列（参考文件两列同名「长(CM)」，客户取首次、出给客户取末次）；`loadHistory()` 兼容旧 `{品名:...}` 格式自动迁移为数组
+    - 位置：`warehouse-entry.ts` `HistoryEntry`/`HistoryLibrary` + `isSameHistoryProduct`/`historyIdentity`/`upsertHistoryEntry` + `importHistoryFromExcel`/`loadHistory`
+
+29. **TR入仓客户「货箱清单」格式：实重是「单箱货物毛重」而非「货箱重量」** (2026-09-02)
+    - 症状：新客户文件 `客户数据-给英美-0824到0830.xlsx` 的「货箱重量」列（如 2442.45）是整张 SO 的**总重**，若误取为单箱实重会导致计费重虚高数十倍
+    - 根因：此格式与「易通发票」不同——易通发票「货箱重量」= 单箱实重，而货箱清单「货箱重量」= SO 总重；真正的单箱实重在「单箱货物毛重(KG)」列（另有「单箱货物净重(KG)」列，毛重≠净重，须取毛重）。同表同时有「英文品名」「中文品名」两列，「品名」兜底会误命中「英文品名」
+    - 修复：新增 `CUSTOMER_CARGO_PATTERNS`（`productName:["中文品名"]`、`actualWeight:["单箱货物毛重"]`、`totalBoxes:["总箱数(CTN)"]` 等），`parseCustomerFile()` 通过「表头是否含『单箱货物毛重』」自动切换（优先级在发票格式之后、标准格式之前）。无「材积重」列，按公式重算
+    - 位置：`warehouse-entry.ts` `CUSTOMER_CARGO_PATTERNS` + `parseCustomerFile()` 格式检测分支
+
+30. **TR入仓「出给客户」改为沿用供应商选数箱规，取消单行强制放大** (2026-09-02)
+    - 规则：出给客户 = 供应商选数箱规（尺寸 + 该箱规最大实重 + 公式材积重），不再按「实重/材积主导」分支强制放大；同时撤销 #27 的「实重主导 0.4 上限」与「材积主导 ×1.02 放大」
+    - 差异约束（对比客户申报）：三边和差必须 `< 6`（`>= 6` 报警）、材积重差必须 `< 2`（`>= 2` 报警）；超限报警文案改为「请核查过机图」（供应商过大箱同理），对应「供应商数据明显偏大 → 标红要求找供应商核查过机图，核实后再修改」
+    - 参考优先级：历史有数据用历史参考、有供应商数据用供应商数据参考（供应商实测为准），历史仅作「历史最大计费重 > 建议值」报警用，不再参与建议实重取 max
+    - 连带删除：`ACTUAL_CAP_TOLERANCE` 常量、`historyMaxActual` 局部变量（实重主导分支专用）；`forceAmplify()` 仅剩 `exportOutputBuffer()` 全局兜底引用
+    - 位置：`warehouse-entry.ts` `buildSuggestions()`（删除单行校验分支）+ 报警文案
+
+31. **TR入仓「出给客户」恢复最短边放大：供应商选数箱规 + 最短边 +1** (2026-09-03)
+    - 背景：实测答案文件《正确答案-给英美-0824到0830.xlsx》里 53/105 例对供应商选数箱做了「单边 +1」放大（多为最短边，如 `54×53×36`→`54×53×37`），并约束「材积重差 < 2」
+    - 规则：出给客户 = 供应商选数箱规 + 放大**最短边 +1**（尽量不放大最大边，取较短两边中更短那条）；实重 = 该箱规所有箱最大实重；材积重 = 公式重算
+    - 放大约束：放大后材积重 − 客户材积重 必须 `< 2`、计费重不超过历史最大计费重（历史最大是上限）；任一不满足 → 不放大（退回供应商原尺寸）。例：供应商 `54×53×36`、客户 `51.5×51.5×36` → 最多 `54×53×37`，再大材积重差 ≥ 2
+    - 实测匹配率：尺寸精确匹配 42/105（不放大）→ **48/105（最短边 +1）**；其余为人工手改噪声（同一供应商箱有时加宽、有时加高），无法确定性 100% 复现
+    - 位置：`warehouse-entry.ts` 新增 `amplifyDims()`（最短边 +1 + 两条约束），`buildSuggestions()` 供应商代表箱保留原始值、`suggestion` 用放大值
+
+32. **TR入仓「查过机图」报警改为按供应商原始箱规 + 区分材积/实重主导** (2026-09-03)
+    - 背景：原报警用「出给客户建议值（已放大）」对比客户；现改为用「供应商**原始箱规**」（选数命中的代表箱，未放大值）对比客户
+    - 规则：**材积主导**（供应商体积重 ≥ 实重）→ 三边和差 ≥ 6、材积重差 ≥ 2 均「核查过机图」；**实重主导**（供应商体积重 < 实重）→ 实重差 ≥ 0.5「核查过机图」
+    - 新增常量 `ACTUAL_DIFF_THRESHOLD = 0.5`；材积重差文案由「材积重差异超限」补为「材积重差异超限，请核查过机图」
+    - 前端 `recomputeAlarms()` 同步该口径（编辑建议值后实时重算报警）
+    - 位置：`warehouse-entry.ts` `buildSuggestions()` 报警块 + `page.tsx` `recomputeAlarms()`
+
+33. **TR入仓导出 B–F 列（系统SO/客户渠道/国家/仓库代码/单证报关）从客户数据自动取数** (2026-09-03)
+    - 背景：用户反馈导出的「出给客户」Excel 里 系统SO/客户渠道/国家/仓库代码/单证报关 五列空白，实际数据源在客户数据文件里（货箱清单格式的 系统SO(第1列)/国家(第3列)/仓库代码(第4列)/单证报关(第5列)/客户渠道(第27列)）
+    - 修复：`CustomerRow`/`SuggestionRow` 各新增 `so/channel/country/warehouse/customs` 五字段；三个 `CUSTOMER_*_PATTERNS` 增加对应列名匹配（`系统SO`/`客户渠道`/`国家`/`仓库代码`/`单证报关`）；`parseCustomerFile` 读取、`buildSuggestions` 透传（未匹配分支与正常分支两处 push 都需填，漏填导致对应行空白）、`exportOutputBuffer` 写入 B/C/D/E/F 列。出货日期(A) 客户数据无此列，仍留空
+    - 前端无需改动：`editSuggestion` 用 `{...r, suggestion}` 整体保留行对象、`handleExport` 整体 `JSON.stringify({rows})` 回传，新字段自动透传
+    - 位置：`warehouse-entry.ts` `CustomerRow`/`SuggestionRow`/`CUSTOMER_*_PATTERNS`/`parseCustomerFile`/`buildSuggestions`/`exportOutputBuffer`
+
+34. **TR入仓选数改为按历史参考值决定第 1/第 2 大** (2026-09-03)
+    - 规则：选数不再固定取计费重第 1 大——有历史同款时：供应商第 1 大计费重 ≤ 历史最大计费重 → 取第 1 大（并保留「历史最大 > 建议值 → 建议参考历史最大值放大」报警）；第 1 大超过历史最大 → 退取第 2 大；新品（无历史）→ 直接取第 2 大（避免取到偶发偏大的异常箱）；仅 1 箱回退第 1 大
+    - 实现：`selectBox(sorted, historyMaxChargeable)` 增加历史参数；`buildSuggestions` 调用时传 `historyMax?.chargeableWeight ?? null`。`supplierChargeable` 仍保持 `sorted[0].chargeableWeight`（供应商最大计费重，供前端与「历史最大」列对比）；`pickedRank` 自动反映选中的是 1 还是 2
+    - 位置：`warehouse-entry.ts` `selectBox()` + `buildSuggestions()` 选数处
+
+35. **TR入仓导出格式精确对齐参考文件（字体/颜色/列宽/边框）** (2026-09-03)
+    - 背景：用户要求导出 Excel 与参考文件《TRKJ26080099和TRKJ26080100全部数据.xlsx》格式一致（含字体、颜色）
+    - 实现（`exportOutputBuffer`）：
+      - 字体：全表宋体 11、黑色；第 2 行列名表头加粗，分组表头/数据/合计不加粗
+      - 分组表头三色：客户的 `FFDEEBF7`（浅蓝）、供应商 `FFFBE5D6`（浅橙）、出给客户 `FFE2F0D9`（浅绿）
+      - 列名表头分类：主体 `FFADB9CA`（灰蓝加粗）、分隔列 O/X `FFE2F0D9`、尾列 AK-AN `FF5B9BD5`（蓝不加粗）、备注 AJ 无填充无边框
+      - 边框：数据区细黑边框（`FF000000`）；合计行与 AJ 列无边框；`showGridLines=false`（隐藏网格线）
+      - 列宽 40 列精确复刻；numFmt：材积重/总材积重/差异 `0.00_);[Red](0.00)`（负数红）、总实重 `0.00_`、计费重 `0_`
+      - 合计行无边框无填充、宋体 11，仅填总箱数/计费重/总计费重/箱数/总计费重 SUM 公式
+    - 坑：统一字体循环若从 R2 起会覆盖表头加粗，须从 R3 起；分组表头合并后非左上角单元格也要逐个设 fill 才整片着色
+    - 位置：`warehouse-entry.ts` `exportOutputBuffer()` 样式常量 + 分组/表头/数据/合计/列宽/边框块
+
+36. **TR入仓导出按 SO 合并 + 渠道汇总行 + 文件名含合计箱数** (2026-09-03)
+    - 背景：AH 总计费重/AI 成本KG 按 SO 合并；AK-AN 列按渠道汇总；文件名带合计总箱数
+    - 实现（`exportOutputBuffer` + `export/route.ts` + `page.tsx`）：
+      - 明细行先按 渠道→SO 稳定排序（`channelOrder`/`soOrder` Map 记录首次出现顺序），确保同 SO、同渠道相邻
+      - SO 级合并：B(系统SO)/F(单证报关)/AH(总计费重)/AI(成本KG) 用 `mergeCells`；B/F 仅 SO 首行填值；AH 首行填 `SUM(AG范围)`（=该 SO 各产品计费重之和）；AI 留空供人工回填（可与供应商砍价）
+      - 渠道汇总：AK-AN 列从第 3 行起连续填每渠道一行（AK=渠道名、AL=`SUM(I范围)`、AM=`SUM(AH范围)`、AN=`SUM(AI范围)`），末行「合计」`SUM` 各渠道汇总；A-AJ 列明细从 R3 起不受影响
+      - 总合计行：I/AG/AH/AI 的 `SUM`（范围仅明细区）
+      - 文件名：`内部三类数据_<日期>_合计总箱数<N>.xlsx`，N=Σ totalBoxes（前端 `a.download` 与服务端 Content-Disposition 都要同步改，浏览器以 a.download 为准）
+    - 坑：参考文件 AH 是 SO 级 `SUM(AG)` 而非逐行 `=AG`（原实现错误）；明细行 AK-AN 应为空、只在渠道汇总行填（原实现把 AL/AM 抄到明细行，与参考文件不符）
+    - 位置：`warehouse-entry.ts` `exportOutputBuffer()` 数据/合并/渠道汇总/合计块；`export/route.ts` 与 `page.tsx` 文件名
+
+37. **TR入仓「供应商小于客户」时出给客户取历史最大值 + 单独提示** (2026-09-03)
+    - 背景：供应商实测（选数命中箱）计费重 < 客户申报计费重时，若仍以供应商偏小值出给客户会亏运费，需改参考历史合理值
+    - 规则：`supplierPickedChargeable = max(供应商代表箱实重, 材积重) < 客户计费重` → 报警「供应商小于客户，请确认」；若有历史同款（`historyMax`）→ 出给客户建议值整体取历史最大值（长/宽/高/实重/材积重/计费重/三边和），避免出给客户比客户还小；无历史（新品）→ 仅提示，保持供应商选数+放大值
+    - 顺序：放在「供应商过大箱」报警之后、「历史对比」报警之前——取历史最大值后 `historyMax.chargeableWeight > suggestion.chargeableWeight` 恒为 false（相等），故「建议参考历史最大值放大」不会误触发
+    - 位置：`warehouse-entry.ts` `buildSuggestions()` 供应商过大箱报警与历史对比之间
+
+38. **TR入仓供应商新增「给总部」格式（逐箱，FBA号列 + 单件重量）** (2026-09-03)
+    - 背景：新增「供应商数据-给总部-0824到0830 更新.xlsx」格式，与天图/英美入仓同构但列名不同，且是「多 SO 块堆叠」（每个 SO 块：块头 4 行 + 表头 + 逐箱数据 + TOTAL）
+    - 格式：FBA 在「FBA号」列（`FBA19MTJH5NPU000014` → 取「U+流水号」前）；箱规在 长(CM)/宽(CM)/高(CM)；单箱实重=「单件重量（KGS)」、材积重=「单件材积(KGS)」
+    - 实现：新增 `SUPPLIER_HEADQUARTERS_PATTERNS`；`parseSupplierFile` 的 `findHeaderRow` 增加 `["FBA号","单件重量"]` 兜底（原 `["货箱编号","货箱长"]` 匹配不到此格式）；格式检测用「单件重量」→ 给总部
+    - 坑：多 SO 块堆叠，数据行之间夹着块头行（「目的港/仓库代码」等文本）和 TOTAL 行，`readRowText(map.fbaId)` 会读到这些非空文本；须在读取时过滤「FBA 提取后非 `FBA+字母数字`」的行（`/^FBA[A-Z0-9]+$/i`），否则会把表头「FBA号」/TOTAL「计费重:xxx」/块头「目的港:加拿大」误当成箱（曾误读 2 箱 FBA=「FBA号」）
+    - 坑：文件带第二个 sheet「TRKJ26080107」（某 SO 的重复明细），仅读 `worksheets[0]` 避免重复计数
+    - 位置：`warehouse-entry.ts` `SUPPLIER_HEADQUARTERS_PATTERNS` + `parseSupplierFile()` 表头检测/格式检测/数据过滤
 
 ### 待重构项
 
@@ -635,6 +939,25 @@ kubectl apply -f k8s/deploy-sealos.yaml
 # 本地构建验证
 npm run build
 ```
+
+#### 本机内网部署（192.168.3.16:3001，pm2 生产模式）
+
+> 2026-09-02 由 `next dev -p 3001`（开发模式）切换为 pm2 托管的 `next start` 生产模式。配置见项目根目录 `ecosystem.config.cjs`。
+
+```bash
+cd "C:/Users/berry/Downloads/ETTON 电商AI"
+npm run build                         # 先构建生产版本
+pm2 restart etton-tools               # 重启（生产模式，端口 3001）
+pm2 logs etton-tools                  # 查看日志
+pm2 start ecosystem.config.cjs        # 首次启动
+pm2 save                              # 保存进程列表（pm2 重启后自动恢复）
+
+# 若需开机自启（需管理员权限，一次性）：
+pm2 startup
+pm2 save
+```
+
+> 注意：切生产模式前必须**彻底停掉所有 `next dev` 进程**（`netstat -ano | grep 3001` 找到 PID 后 `taskkill /F /T /PID <pid>`），否则 dev 会占用 3001 端口导致 `EADDRINUSE`，或覆盖 `.next` 生产构建导致 `Could not find a production build`。
 
 #### Docker 构建失败排查
 

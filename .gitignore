@@ -43,6 +43,7 @@ next-env.d.ts
 # Test files
 保单拆分功能/
 public/data/
+data/
 public/output/
 test_output.xlsx
 start-claude.ps1

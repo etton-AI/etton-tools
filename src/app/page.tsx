@@ -40,6 +40,12 @@ export default function HomePage() {
         >
           📄 延讯下单优化
         </Link>
+        <Link
+          href="/warehouse-entry"
+          className="rounded-lg bg-teal-600 px-5 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-teal-500 transition-colors"
+        >
+          📥 TR入仓数据整理
+        </Link>
       </div>
     </div>
   );
