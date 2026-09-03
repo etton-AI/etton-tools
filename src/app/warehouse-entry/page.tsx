@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import type { SuggestionRow } from "@/lib/warehouse-entry";
 
 // ============================================================
@@ -96,6 +96,22 @@ export default function WarehouseEntryPage() {
   const customerInputRef = useRef<HTMLInputElement>(null);
   const supplierInputRef = useRef<HTMLInputElement>(null);
   const historyInputRef = useRef<HTMLInputElement>(null);
+
+  // 打开页面即读取历史库条数（无需先上传出结果）
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/warehouse-entry")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!cancelled && data && typeof data.count === "number") {
+          setHistoryCount(data.count);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleSubmit = useCallback(async () => {
     if (!customerFile || !supplierFile) return;
@@ -293,11 +309,31 @@ export default function WarehouseEntryPage() {
   return (
     <div className="space-y-8">
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold text-zinc-800">📦 TR入仓数据整理</h1>
-        <p className="mt-1 text-sm text-zinc-500">
-          上传客户数据 + 供应商数据，自动匹配选数、校验报警，生成「出给客户」建议箱规
-        </p>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-zinc-800">📦 TR入仓数据整理</h1>
+          <p className="mt-1 text-sm text-zinc-500">
+            上传客户数据 + 供应商数据，自动匹配选数、校验报警，生成「出给客户」建议箱规
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-2 rounded-lg border border-zinc-200 bg-white p-2 shadow-sm">
+          <span className="px-1 text-sm text-zinc-500">
+            历史库 <span className="font-medium text-zinc-700">{historyCount}</span> 条
+          </span>
+          <button
+            onClick={() => historyInputRef.current?.click()}
+            title="支持导入「最终出给客户」的 Excel（如《…出给客户的.xlsx》）或历史参考文件，同款将覆盖为最终值"
+            className="inline-flex items-center gap-1 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-50 transition-colors"
+          >
+            导入历史库
+          </button>
+          <button
+            onClick={handleHistoryExport}
+            className="inline-flex items-center gap-1 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-50 transition-colors"
+          >
+            导出历史库
+          </button>
+        </div>
       </div>
 
       {/* Upload Area */}
@@ -387,24 +423,9 @@ export default function WarehouseEntryPage() {
                 匹配 <span className="font-medium text-zinc-700">{summary?.matchedCount}</span>
                 {" · "}
                 需复核 <span className="font-medium text-amber-600">{summary?.unmatchedCount}</span>
-                {" · "}
-                历史库 <span className="font-medium text-zinc-700">{historyCount}</span> 条
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-3">
-              <button
-                onClick={() => historyInputRef.current?.click()}
-                title="支持导入「最终出给客户」的 Excel（如《…出给客户的.xlsx》）或历史参考文件，同款将覆盖为最终值"
-                className="inline-flex items-center gap-2 rounded-lg border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-50 transition-colors"
-              >
-                导入历史库
-              </button>
-              <button
-                onClick={handleHistoryExport}
-                className="inline-flex items-center gap-2 rounded-lg border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-50 transition-colors"
-              >
-                导出历史库
-              </button>
               <button
                 onClick={reset}
                 className="inline-flex items-center gap-2 rounded-lg border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-50 transition-colors"

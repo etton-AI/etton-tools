@@ -130,7 +130,7 @@
 | `src/app/api/warehouse-entry/route.ts` | 上传 + 读取历史库 |
 | `src/app/api/warehouse-entry/export/route.ts` | 导出 + 累积历史库 |
 | `src/app/api/warehouse-entry/history/route.ts` | 历史库导入/导出 |
-| `src/app/warehouse-entry/page.tsx` | 前端页面（建议表格含「三边和差异」列：供应商三边和 − 客户三边和，\|差\| ≥ 6 标红，未匹配显示「—」） |
+| `src/app/warehouse-entry/page.tsx` | 前端页面（建议表格含「三边和差异」列：供应商三边和 − 客户三边和，\|差\| ≥ 6 标红，未匹配显示「—」；历史库导入/导出按钮常驻页面顶部，打开即可操作，无需先上传出结果） |
 | `data/history.json` | 历史库（运行时创建） |
 
 ## 六、导出格式（对齐参考文件《拓锐…入仓数据（成本）.xlsx》）
