@@ -721,7 +721,7 @@ export function buildSuggestions(
     // 用供应商真实最大计费重（第 1 大箱 supplierChargeable）判断，与前端「供应商计费重」列一致；
     // 不能用选数命中箱规（退选第 2 大时其计费重可能 < 客户，会误报）。
     if (supplierChargeable < c.chargeableWeight) {
-      alarms.push("供应商小于客户，请确认");
+      alarms.push("供应商计费重小于客户，请确认");
       if (historyMax) {
         suggestion.lengthCm = historyMax.lengthCm;
         suggestion.widthCm = historyMax.widthCm;

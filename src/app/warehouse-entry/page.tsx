@@ -465,31 +465,31 @@ export default function WarehouseEntryPage() {
           </div>
 
           {/* 可编辑建议表格 */}
-          <div className="rounded-xl border border-zinc-200 bg-white overflow-hidden">
+          <div className="rounded-xl border border-zinc-200 bg-white">
             <div className="border-b border-zinc-200 px-5 py-3">
               <h2 className="text-sm font-semibold text-zinc-700">
                 建议箱规（{rows.length} 个产品，可直接编辑长/宽/高/实重）
               </h2>
             </div>
-            <div className="overflow-x-auto">
+            <div>
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="border-b border-zinc-200 bg-zinc-50 text-left text-xs font-semibold uppercase tracking-wider text-zinc-500">
-                    <th className="px-3 py-2">FBA ID</th>
-                    <th className="px-3 py-2">中文品名</th>
-                    <th className="px-3 py-2 text-right">箱数</th>
-                    <th className="px-3 py-2 text-center">客户箱规</th>
-                    <th className="px-3 py-2 text-center">建议长(CM)</th>
-                    <th className="px-3 py-2 text-center">建议宽(CM)</th>
-                    <th className="px-3 py-2 text-center">建议高(CM)</th>
-                    <th className="px-3 py-2 text-center">建议实重</th>
-                    <th className="px-3 py-2 text-right">材积重</th>
-                    <th className="px-3 py-2 text-right">计费重</th>
-                    <th className="px-3 py-2 text-right">供应商计费重</th>
-                    <th className="px-3 py-2 text-center">三边和差异</th>
-                    <th className="px-3 py-2 text-center">选中名次</th>
-                    <th className="px-3 py-2 text-right">历史最大</th>
-                    <th className="px-3 py-2">报警</th>
+                  <tr className="border-b border-zinc-200 text-left text-xs font-semibold uppercase tracking-wider text-zinc-500">
+                    <th className="sticky top-16 z-10 bg-zinc-50 px-3 py-2">FBA ID</th>
+                    <th className="sticky top-16 z-10 bg-zinc-50 px-3 py-2">中文品名</th>
+                    <th className="sticky top-16 z-10 bg-zinc-50 px-3 py-2 text-right">箱数</th>
+                    <th className="sticky top-16 z-10 bg-zinc-50 px-3 py-2 text-center">客户箱规</th>
+                    <th className="sticky top-16 z-10 bg-zinc-50 px-3 py-2 text-center">建议长(CM)</th>
+                    <th className="sticky top-16 z-10 bg-zinc-50 px-3 py-2 text-center">建议宽(CM)</th>
+                    <th className="sticky top-16 z-10 bg-zinc-50 px-3 py-2 text-center">建议高(CM)</th>
+                    <th className="sticky top-16 z-10 bg-zinc-50 px-3 py-2 text-center">建议实重</th>
+                    <th className="sticky top-16 z-10 bg-zinc-50 px-3 py-2 text-right">材积重</th>
+                    <th className="sticky top-16 z-10 bg-zinc-50 px-3 py-2 text-right">计费重</th>
+                    <th className="sticky top-16 z-10 bg-zinc-50 px-3 py-2 text-right">供应商计费重</th>
+                    <th className="sticky top-16 z-10 bg-zinc-50 px-3 py-2 text-center">三边和差异</th>
+                    <th className="sticky top-16 z-10 bg-zinc-50 px-3 py-2 text-center">选中名次</th>
+                    <th className="sticky top-16 z-10 bg-zinc-50 px-3 py-2 text-right">历史最大</th>
+                    <th className="sticky top-16 z-10 bg-zinc-50 px-3 py-2">报警</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-100">
