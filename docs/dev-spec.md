@@ -860,6 +860,12 @@ interface PacificSplitResult {
     - 连带坑：Node v24 `Buffer<ArrayBufferLike>` 与 ExcelJS 自声明的 `interface Buffer extends ArrayBuffer` 类型不兼容，`load` 入参用 `as unknown as Parameters<typeof srcWb.xlsx.load>[0]` 断言绕过（运行时内部走 jszip，Node Buffer 完全可用）
     - 位置：`yanxun-convert.ts` `loadFirstSheetOnly()` + 读取处（`loadFirstSheetOnly` 前于 `convertYanxunToEtton` 的读取逻辑）
 
+43. **TR入仓「供应商小于客户」报警用错口径（退选第 2 大时误报）** (2026-09-04)
+    - 症状：某产品「供应商计费重」列显示 135.00、客户 132.00（供 > 客），却报「供应商小于客户，请确认」
+    - 根因：前端「供应商计费重」列取 `supplierChargeable`（第 1 大箱 `sorted[0]`），报警判断却取 `supplierPickedChargeable`（选数命中箱规 `picked`）。`selectBox` 在「新品」或「第 1 大 > 历史最大」时退选第 2 大，第 2 大箱规计费重 < 客户 → 误报，与展示的「供 135 > 客 132」矛盾
+    - 修复：「供应商小于客户」判断改用 `supplierChargeable`（第 1 大真实最大计费重），与展示一致；仅供应商真实最大确实小于客户时才报警
+    - 位置：`warehouse-entry.ts` `buildSuggestions()` 报警分支（`supplierChargeable < c.chargeableWeight`）
+
 ### 待重构项
 
 - [ ] 将 session 存储从内存 Map 改为临时文件或 Redis

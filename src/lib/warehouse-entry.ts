@@ -718,8 +718,9 @@ export function buildSuggestions(
 
     // 供应商小于客户：单独提示，并取历史最大值（若有）作为出给客户建议，
     // 避免出给客户比客户申报还小（供应商装箱偏小 → 参考历史合理值）。
-    const supplierPickedChargeable = Math.max(supplier.actualWeight, supplier.volumeWeight);
-    if (supplierPickedChargeable < c.chargeableWeight) {
+    // 用供应商真实最大计费重（第 1 大箱 supplierChargeable）判断，与前端「供应商计费重」列一致；
+    // 不能用选数命中箱规（退选第 2 大时其计费重可能 < 客户，会误报）。
+    if (supplierChargeable < c.chargeableWeight) {
       alarms.push("供应商小于客户，请确认");
       if (historyMax) {
         suggestion.lengthCm = historyMax.lengthCm;
