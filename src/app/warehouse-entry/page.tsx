@@ -311,7 +311,7 @@ export default function WarehouseEntryPage() {
       {/* Header */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-zinc-800">📦 TR入仓数据整理</h1>
+          <h1 className="text-2xl font-bold text-deep">📦 TR入仓数据整理</h1>
           <p className="mt-1 text-sm text-zinc-500">
             上传客户数据 + 供应商数据，自动匹配选数、校验报警，生成「出给客户」建议箱规
           </p>
@@ -368,7 +368,7 @@ export default function WarehouseEntryPage() {
               disabled={!canSubmit}
               className={`inline-flex items-center gap-2 rounded-lg px-6 py-3 text-sm font-medium shadow-sm transition-colors ${
                 canSubmit
-                  ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                  ? "bg-primary text-white hover:bg-primary-dark"
                   : "cursor-not-allowed bg-zinc-200 text-zinc-400"
               }`}
             >
@@ -519,7 +519,7 @@ export default function WarehouseEntryPage() {
                           step="1"
                           value={r.suggestion.lengthCm}
                           onChange={(e) => editSuggestion(i, "lengthCm", parseFloat(e.target.value) || 0)}
-                          className="w-16 rounded border border-zinc-300 px-1 py-0.5 text-center text-sm focus:border-emerald-500 focus:outline-none"
+                          className="w-16 rounded border border-zinc-300 px-1 py-0.5 text-center text-sm focus:border-primary focus:outline-none"
                         />
                       </td>
                       <td className="px-1 py-1 text-center">
@@ -528,7 +528,7 @@ export default function WarehouseEntryPage() {
                           step="1"
                           value={r.suggestion.widthCm}
                           onChange={(e) => editSuggestion(i, "widthCm", parseFloat(e.target.value) || 0)}
-                          className="w-16 rounded border border-zinc-300 px-1 py-0.5 text-center text-sm focus:border-emerald-500 focus:outline-none"
+                          className="w-16 rounded border border-zinc-300 px-1 py-0.5 text-center text-sm focus:border-primary focus:outline-none"
                         />
                       </td>
                       <td className="px-1 py-1 text-center">
@@ -537,7 +537,7 @@ export default function WarehouseEntryPage() {
                           step="1"
                           value={r.suggestion.heightCm}
                           onChange={(e) => editSuggestion(i, "heightCm", parseFloat(e.target.value) || 0)}
-                          className="w-16 rounded border border-zinc-300 px-1 py-0.5 text-center text-sm focus:border-emerald-500 focus:outline-none"
+                          className="w-16 rounded border border-zinc-300 px-1 py-0.5 text-center text-sm focus:border-primary focus:outline-none"
                         />
                       </td>
                       <td className="px-1 py-1 text-center">
@@ -546,7 +546,7 @@ export default function WarehouseEntryPage() {
                           step="0.1"
                           value={r.suggestion.actualWeight}
                           onChange={(e) => editSuggestion(i, "actualWeight", parseFloat(e.target.value) || 0)}
-                          className="w-16 rounded border border-zinc-300 px-1 py-0.5 text-center text-sm focus:border-emerald-500 focus:outline-none"
+                          className="w-16 rounded border border-zinc-300 px-1 py-0.5 text-center text-sm focus:border-primary focus:outline-none"
                         />
                       </td>
                       <td className="px-3 py-2 text-right font-mono text-xs text-zinc-600">
@@ -628,7 +628,7 @@ export default function WarehouseEntryPage() {
             <button
               onClick={handleExport}
               disabled={exporting}
-              className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-6 py-3 text-sm font-medium text-white shadow-sm hover:bg-emerald-700 transition-colors disabled:cursor-not-allowed disabled:bg-zinc-300"
+              className="inline-flex items-center gap-2 rounded-lg bg-primary px-6 py-3 text-sm font-medium text-white shadow-sm hover:bg-primary-dark transition-colors disabled:cursor-not-allowed disabled:bg-zinc-300"
             >
               {exporting ? (
                 <>
@@ -692,8 +692,8 @@ function UploadBox({
           file
             ? "border-zinc-300 bg-white"
             : isDragging
-              ? "border-emerald-400 bg-emerald-50"
-              : "border-zinc-300 bg-zinc-50 hover:border-zinc-400 hover:bg-zinc-100"
+              ? "border-primary bg-primary/5"
+              : "border-[#C7E0F0] bg-white/60 hover:border-primary hover:bg-primary/5"
         }
       `}
     >

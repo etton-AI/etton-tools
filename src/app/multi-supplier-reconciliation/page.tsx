@@ -176,7 +176,7 @@ export default function MultiSupplierReconciliationPage() {
     <div className="space-y-8">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-zinc-800">
+        <h1 className="text-2xl font-bold text-deep">
           🔄 多供应商对账引擎
         </h1>
         <p className="mt-1 text-sm text-zinc-500">
@@ -251,7 +251,7 @@ export default function MultiSupplierReconciliationPage() {
               disabled={!canSubmit}
               className={`inline-flex items-center gap-2 rounded-lg px-6 py-3 text-sm font-medium shadow-sm transition-colors ${
                 canSubmit
-                  ? "bg-violet-600 text-white hover:bg-violet-700"
+                  ? "bg-primary text-white hover:bg-primary-dark"
                   : "cursor-not-allowed bg-zinc-200 text-zinc-400"
               }`}
             >
@@ -333,7 +333,7 @@ export default function MultiSupplierReconciliationPage() {
             <div className="flex gap-3">
               <a
                 href={result.downloadUrl}
-                className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-violet-700 transition-colors"
+                className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-primary-dark transition-colors"
                 download
               >
                 <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -480,7 +480,7 @@ function UploadBox({
           ? `${borderColor} bg-white`
           : isDragging
             ? activeBorder
-            : "border-zinc-300 bg-zinc-50 hover:border-zinc-400 hover:bg-zinc-100"
+            : "border-[#C7E0F0] bg-white/60 hover:border-primary hover:bg-primary/5"
       }`}
     >
       {file ? (

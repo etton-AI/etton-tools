@@ -139,7 +139,7 @@ export default function InsuranceSplitPage() {
     <div className="space-y-8">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-zinc-800">
+        <h1 className="text-2xl font-bold text-deep">
           📦 保单投保区间拆分
         </h1>
         <p className="mt-1 text-sm text-zinc-500">
@@ -158,15 +158,15 @@ export default function InsuranceSplitPage() {
             flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed p-12 transition-colors
             ${
               isDragging
-                ? "border-blue-400 bg-blue-50"
-                : "border-zinc-300 bg-zinc-50 hover:border-zinc-400 hover:bg-zinc-100"
+                ? "border-primary bg-primary/5"
+                : "border-[#C7E0F0] bg-white/60 hover:border-primary hover:bg-primary/5"
             }
             ${processing ? "pointer-events-none opacity-60" : ""}
           `}
         >
           {processing ? (
             <>
-              <div className="mb-4 h-10 w-10 animate-spin rounded-full border-4 border-zinc-300 border-t-blue-600" />
+              <div className="mb-4 h-10 w-10 animate-spin rounded-full border-4 border-zinc-300 border-t-primary" />
               <p className="text-lg font-medium text-zinc-600">正在处理中...</p>
               <p className="mt-1 text-sm text-zinc-400">读取文件、分组计算、生成拆分文件</p>
             </>
@@ -239,7 +239,7 @@ export default function InsuranceSplitPage() {
             <div className="flex gap-3">
               <a
                 href={result.downloads.allZip}
-                className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700 transition-colors"
+                className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-primary-dark transition-colors"
                 download
               >
                 <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">

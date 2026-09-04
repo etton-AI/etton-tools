@@ -100,7 +100,7 @@ export default function PipixiongSplitPage() {
     <div className="space-y-8">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-zinc-800">🧾 皮皮熊账单拆分</h1>
+        <h1 className="text-2xl font-bold text-deep">🧾 皮皮熊账单拆分</h1>
         <p className="mt-1 text-sm text-zinc-500">
           上传皮皮熊合并账单 Excel，自动拆分为国内账单、国外账单和 INVOICE
         </p>
@@ -112,12 +112,12 @@ export default function PipixiongSplitPage() {
           onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}
           onClick={() => !processing && fileInputRef.current?.click()}
           className={`flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed p-12 transition-colors
-            ${isDragging ? "border-violet-400 bg-violet-50" : "border-zinc-300 bg-zinc-50 hover:border-zinc-400 hover:bg-zinc-100"}
+            ${isDragging ? "border-primary bg-primary/5" : "border-[#C7E0F0] bg-white/60 hover:border-primary hover:bg-primary/5"}
             ${processing ? "pointer-events-none opacity-60" : ""}`}
         >
           {processing ? (
             <>
-              <div className="mb-4 h-10 w-10 animate-spin rounded-full border-4 border-zinc-300 border-t-violet-600" />
+              <div className="mb-4 h-10 w-10 animate-spin rounded-full border-4 border-zinc-300 border-t-primary" />
               <p className="text-lg font-medium text-zinc-600">正在处理中...</p>
               <p className="mt-1 text-sm text-zinc-400">读取账单、拆分国内/国外费用、生成 INVOICE</p>
             </>
