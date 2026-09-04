@@ -494,6 +494,7 @@ interface PacificSplitResult {
 
 **导出函数**:
 - `convertYanxunToEtton(filePath, sourceFileName)` → `YanxunConvertResult`
+- 读取前先经 `loadFirstSheetOnly()` 精简：用 JSZip 把 xlsx 精简成只含发货单 sheet（删除隐藏的 VLOOKUP 数据源表与外部链接），避免大文件全量解析 OOM（见「已知坑」#42）
 
 **顶部字段映射**（延讯发货单 → 易通模版）:
 
@@ -851,6 +852,13 @@ interface PacificSplitResult {
     - 做法：把历史库重建结果 66 条生成为 `src/lib/history-seed.ts`（`HISTORY_SEED: HistoryEntry[]`，打进镜像），`loadHistory()` 在 `history.json` 不存在时返回 `HISTORY_SEED.map(e => ({...e}))` 兜底；一旦运行时 `accumulateHistory` 累积后写文件，仍优先读文件
     - 数据来源：66 条 = 《拓锐入仓数据参考(1).xlsx》(58 条) + 《拓锐8.29出货1989件入仓数据（做为历史参考）.xlsx》(31 条) 按同款判定（品名+排序尺寸差≤1cm+实重差≤1kg）去重后全集
     - 位置：`src/lib/history-seed.ts`（种子）+ `warehouse-entry.ts` `loadHistory()` 兜底分支
+
+42. **延讯下单优化大文件在低内存环境 OOM（线上 503），用 `loadFirstSheetOnly()` 精简加载修复** (2026-09-03)
+    - 症状：Sealos 线上（256M/0.2 核）上传 3.7MB 延讯发票报「网络错误，请重试」，网关 503 `connection termination`；本地 192.168.3.16:3001 正常
+    - 根因：该 3.7MB xlsx 解压后达 26MB——含隐藏的 VLOOKUP 数据源表（产品资料 `sheet4.xml` 12MB、`externalLink1.xml` 6MB、`sharedStrings.xml` 5.8MB，发货单 `sheet1.xml` 仅 368KB）。ExcelJS `readFile` 全量解析所有 sheet + 外部链接，低内存直接 OOM 被杀，前端 catch 又吞掉真实原因只显示「网络错误」
+    - 修复：新增 `loadFirstSheetOnly()`，在交给 ExcelJS 前先用 JSZip 读取 xlsx 并精简成只含发货单 sheet——`xl/workbook.xml` 只保留第一个 `<sheet>` 并删 `<externalReferences>`/`<definedNames>`；`xl/_rels/workbook.xml.rels` 只留第一个 worksheet 关系、删 externalLink 关系；`[Content_Types].xml` 删多余 worksheet/externalLink 的 `<Override>`；再删多余 `sheetN.xml`/`_rels`/`externalLinks` 文件，`generateAsync` 出精简 buffer 再 `xlsx.load`。大文件内存从 1GB+ 降到一两百 MB
+    - 连带坑：Node v24 `Buffer<ArrayBufferLike>` 与 ExcelJS 自声明的 `interface Buffer extends ArrayBuffer` 类型不兼容，`load` 入参用 `as unknown as Parameters<typeof srcWb.xlsx.load>[0]` 断言绕过（运行时内部走 jszip，Node Buffer 完全可用）
+    - 位置：`yanxun-convert.ts` `loadFirstSheetOnly()` + 读取处（`loadFirstSheetOnly` 前于 `convertYanxunToEtton` 的读取逻辑）
 
 ### 待重构项
 

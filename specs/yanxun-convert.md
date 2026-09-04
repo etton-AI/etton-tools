@@ -1,6 +1,6 @@
 # 延讯下单优化 — 功能规格文档
 
-> 最后更新: 2026-08-28 | 维护者: berry-bi
+> 最后更新: 2026-09-03 | 维护者: berry-bi
 
 ## 1. 功能概述
 
@@ -161,5 +161,5 @@ Quantity、Unit Price、Total Price、currency、HS Code、brand、Model、Brand
 - 海外仓场景（「FBA号/海外仓」字段值含「海外仓」）不填 FBA 地址库组，改为从「目的地」地址文本自动解析并填充「私人地址/海外仓」收件人信息
 - brand/Model/Brand Type 固定填「无」（延讯发票不提供品牌信息）
 - 链接列无数据填 `0`、图片列固定填 `0`；是否申报、申报数量列留空（延讯发票无对应数据）
-- 仅处理发货单 sheet（第一个 sheet），忽略其他 sheet
+- 仅处理发货单 sheet（第一个 sheet），忽略其他 sheet；实现上用 `loadFirstSheetOnly()` 在解析前先用 JSZip 精简 xlsx（只保留发货单 sheet、删除隐藏的 VLOOKUP 数据源表与外部链接），避免大文件全量解析吃内存导致 OOM——3.7MB 发票解压后达 26MB（产品资料 sheet 12MB + externalLink 6MB），精简后仅加载发货单，内存从 1GB+ 降到一两百 MB
 - 模板数据区（R25 起）预置的示例行删除时用 `actualRowCount` 计算删除行数，不能用 `rowCount`（否则 `spliceRows` 静默失败，示例数据残留到输出底部）
