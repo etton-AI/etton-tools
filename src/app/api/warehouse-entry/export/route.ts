@@ -21,7 +21,7 @@ export async function POST(request: NextRequest) {
     }
 
     // 先导出（exportOutputBuffer 会执行全局兜底校验，必要时放大并标注 [全局调整]）
-    const buffer = await exportOutputBuffer(rows, supplierTotal);
+    const { buffer, warning } = await exportOutputBuffer(rows, supplierTotal);
 
     // 导出后累积历史库（以出给客户数据为准，同款取计费重更大者）
     accumulateHistory(rows);
@@ -31,13 +31,17 @@ export async function POST(request: NextRequest) {
     const asciiName = fileName.replace(/[^\x00-\x7F]/g, "_");
     const encoded = encodeURIComponent(fileName);
 
-    return new NextResponse(new Uint8Array(buffer), {
+    const response = new NextResponse(new Uint8Array(buffer), {
       headers: {
         "Content-Type":
           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "Content-Disposition": `attachment; filename="${asciiName}"; filename*=UTF-8''${encoded}`,
       },
     });
+    if (warning) {
+      response.headers.set("X-Warning", encodeURIComponent(warning));
+    }
+    return response;
   } catch (error) {
     console.error("warehouse-entry export error:", error);
     return NextResponse.json(

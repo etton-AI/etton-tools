@@ -133,6 +133,8 @@ export interface SuggestionRow {
   /** 供应商代表箱（选数命中箱，未匹配时全 0） */
   supplier: SupplierRepresentative;
   supplierChargeable: number;
+  /** 该 FBA 号供应商总计费重（所有箱计费重之和），用于「成本重过大」提醒 */
+  supplierFbaTotalChargeable: number;
   supplierMaxVolumeWeight: number;
   suggestion: {
     lengthCm: number;
@@ -147,6 +149,8 @@ export interface SuggestionRow {
   historyMax: HistoryEntry | null;
   /** 命中的供应商箱排名（1=第1大，2=第2大…）；null 表示未自动选择或未匹配 */
   pickedRank: number | null;
+  /** 选中名次展示文本：null=未匹配；「历史数值」/「第1大」/「中位数」 */
+  pickedLabel: string | null;
 }
 
 export interface BuildResult {
@@ -208,6 +212,26 @@ function calcVolumeWeight(l: number, w: number, h: number): number {
 /** 箱规 key：长宽高向下取整 */
 function makeSpecKey(b: { lengthCm: number; widthCm: number; heightCm: number }): string {
   return `${Math.floor(b.lengthCm)}_${Math.floor(b.widthCm)}_${Math.floor(b.heightCm)}`;
+}
+
+/**
+ * 供应商代表箱：取指定箱规，实重取该箱规下最大实重，材积重按公式计算。
+ * 选中供应商箱时传入 picked，历史数值时传入 sorted[0]（第 1 大）。
+ */
+function makeSupplierRepresentative(
+  group: SupplierBox[],
+  box: { lengthCm: number; widthCm: number; heightCm: number },
+): SupplierRepresentative {
+  const specKey = makeSpecKey(box);
+  const specBoxes = group.filter((b) => makeSpecKey(b) === specKey);
+  const maxActual = Math.max(...specBoxes.map((b) => b.actualWeight));
+  return {
+    lengthCm: box.lengthCm,
+    widthCm: box.widthCm,
+    heightCm: box.heightCm,
+    actualWeight: maxActual,
+    volumeWeight: calcVolumeWeight(box.lengthCm, box.widthCm, box.heightCm),
+  };
 }
 
 /**
@@ -503,20 +527,6 @@ export async function parseSupplierFile(filePath: string): Promise<SupplierBox[]
 // ============================================================
 
 /**
- * 选数：根据历史参考值决定取计费重第 1 大还是第 2 大那箱。
- *   - 新品（无历史同款）：取第 2 大（避免取到偶发偏大的异常箱）
- *   - 有历史：第 1 大计费重 ≤ 历史最大计费重 → 取第 1 大；超过历史最大 → 退取第 2 大
- * 仅 1 箱时回退到第 1 大（sorted 非空，调用方已保证）。
- */
-function selectBox(sorted: SupplierBox[], historyMaxChargeable: number | null): SupplierBox {
-  const first = sorted[0];
-  const second = sorted[1] ?? first;
-  if (historyMaxChargeable == null) return second;
-  if (first.chargeableWeight > historyMaxChargeable) return second;
-  return first;
-}
-
-/**
  * 放大出给客户箱规：尽量不放大最大边，取最短边 +1 作安全余量。
  * 约束（任一不满足则不放大，返回原尺寸）：
  *   1. 放大后材积重 − 客户材积重 必须 < VOLUME_DIFF_THRESHOLD（2）
@@ -554,22 +564,44 @@ function amplifyDims(
 /**
  * 放大建议值，使材积重/计费重超过 target。
  * 材积主导（材积重 ≥ 实重）时按单边整数放大（每次把最短边 +1）；实重主导时直接放大实重。
+ * 放大受差异约束限制（出给客户 vs 客户申报，不能突破差异报警阈值）：
+ *   材积主导：边和差 < 6 且 材积重差 < 2；
+ *   实重主导：实重差 < 0.5。
+ * 触达约束上限即停止放大。
  */
 function forceAmplify(
   s: SuggestionRow["suggestion"],
+  customer: SuggestionRow["customer"],
   target: number,
 ): void {
   if (s.volumeWeight >= s.actualWeight) {
-    // 材积主导：单边整数放大（每次把最短边 +1，直到材积重 > target）
+    // 材积主导：单边整数放大（每次把最短边 +1），直到材积重 > target 或触达差异约束上限
     let L = s.lengthCm;
     let W = s.widthCm;
     let H = s.heightCm;
 
     let guard = 0;
     while (calcVolumeWeight(L, W, H) <= target && guard < 500) {
-      if (L <= W && L <= H) L += 1;
-      else if (W <= H) W += 1;
-      else H += 1;
+      let nl = L;
+      let nw = W;
+      let nh = H;
+      if (L <= W && L <= H) nl += 1;
+      else if (W <= H) nw += 1;
+      else nh += 1;
+
+      const nextVol = calcVolumeWeight(nl, nw, nh);
+      const nextSum = sumSides(nl, nw, nh);
+      // 差异约束：边和差 < 6 且 材积重差 < 2，超限则停止放大
+      if (
+        Math.abs(nextSum - customer.sumSides) >= SUM_SIDES_THRESHOLD ||
+        Math.abs(nextVol - customer.volumeWeight) >= VOLUME_DIFF_THRESHOLD
+      ) {
+        break;
+      }
+
+      L = nl;
+      W = nw;
+      H = nh;
       guard++;
     }
 
@@ -579,8 +611,9 @@ function forceAmplify(
     s.volumeWeight = calcVolumeWeight(L, W, H);
     s.chargeableWeight = Math.max(s.actualWeight, s.volumeWeight);
   } else {
-    // 实重主导：直接放大实重
-    s.actualWeight = round2(target);
+    // 实重主导：放大实重，但实重差 < 0.5（不突破差异报警阈值）
+    const cap = customer.actualWeight + ACTUAL_DIFF_THRESHOLD - 0.01;
+    s.actualWeight = Math.max(s.actualWeight, Math.min(round2(target), cap));
     s.chargeableWeight = Math.max(s.actualWeight, s.volumeWeight);
   }
   s.sumSides = sumSides(s.lengthCm, s.widthCm, s.heightCm);
@@ -641,73 +674,116 @@ export function buildSuggestions(
         customer,
         supplier: { lengthCm: 0, widthCm: 0, heightCm: 0, actualWeight: 0, volumeWeight: 0 },
         supplierChargeable: 0,
+        supplierFbaTotalChargeable: 0,
         supplierMaxVolumeWeight: 0,
         suggestion: { ...customer },
         alarms: ["⚠需人工复核"],
         historyMax,
         pickedRank: null,
+        pickedLabel: null,
       });
       continue;
     }
 
     const sorted = [...group].sort((a, b) => b.chargeableWeight - a.chargeableWeight);
-    const supplierChargeable = sorted[0].chargeableWeight;
+    const firstChargeable = sorted[0].chargeableWeight;
+    const supplierFbaTotalChargeable = group.reduce((s, b) => s + b.chargeableWeight, 0);
     const supplierMaxVolumeWeight = Math.max(...group.map((b) => b.volumeWeight));
 
-    // 选数（有历史按历史最大决定取第 1/第 2 大；新品取第 2 大）
-    const picked = selectBox(sorted, historyMax ? historyMax.chargeableWeight : null);
+    // 历史可用性（建议 2）：历史「出给客户」值 vs 客户实时数据，三边和差 < 6 且 体积重差 < 2 才可用
+    let historyUsable = false;
+    if (historyMax) {
+      const historySumSides = sumSides(historyMax.lengthCm, historyMax.widthCm, historyMax.heightCm);
+      historyUsable =
+        Math.abs(historySumSides - c.sumSides) < SUM_SIDES_THRESHOLD &&
+        Math.abs(historyMax.volumeWeight - c.volumeWeight) < VOLUME_DIFF_THRESHOLD;
+    }
+    const historyChargeable = historyMax && historyUsable ? historyMax.chargeableWeight : null;
 
-    // 建议值 = 选中箱规的长宽高 + 该箱规所有箱的最大实重 + 公式材积重
-    const specKey = makeSpecKey(picked);
-    const specBoxes = group.filter((b) => makeSpecKey(b) === specKey);
-    const maxActual = Math.max(...specBoxes.map((b) => b.actualWeight));
-    const volumeWeight = calcVolumeWeight(picked.lengthCm, picked.widthCm, picked.heightCm);
+    // 选数（选中箱只决定「出给客户」与「选中名次」）：
+    // 建议 1：历史可用且历史 > 供应商最大值 → 取历史；否则取供应商第 1 大，第 1 大对比客户超限时改取中位数。
+    let pickedRank: number | null;
+    let pickedLabel: string | null;
+    let suggestion: SuggestionRow["suggestion"];
+    // 供应商代表箱与供应商计费重：选中供应商箱时跟随选中箱；历史数值时取第 1 大（最大值）。
+    let supplier: SupplierRepresentative;
+    let supplierChargeable: number;
 
-    // 供应商代表箱 = 选数命中的箱规（未放大的原始值）
-    const supplier: SupplierRepresentative = {
-      lengthCm: picked.lengthCm,
-      widthCm: picked.widthCm,
-      heightCm: picked.heightCm,
-      actualWeight: maxActual,
-      volumeWeight,
-    };
+    if (historyMax && historyUsable && historyMax.chargeableWeight > firstChargeable) {
+      // 建议 1：历史数值 > 供应商最大值 → 输出直接取历史数值
+      // 历史长宽高可能未按「长≥宽≥高」排序，重新降序（最大作长、最小作高），乘积/体积重不变
+      const hDims = [historyMax.lengthCm, historyMax.widthCm, historyMax.heightCm].sort((a, b) => b - a);
+      pickedRank = null;
+      pickedLabel = "历史数值";
+      suggestion = {
+        lengthCm: hDims[0],
+        widthCm: hDims[1],
+        heightCm: hDims[2],
+        actualWeight: historyMax.actualWeight,
+        volumeWeight: historyMax.volumeWeight,
+        chargeableWeight: historyMax.chargeableWeight,
+        sumSides: sumSides(hDims[0], hDims[1], hDims[2]),
+      };
+      // 出给客户展示历史数值时，供应商列展示最大值（第 1 大）
+      supplier = makeSupplierRepresentative(group, sorted[0]);
+      supplierChargeable = firstChargeable;
+    } else {
+      // 取消「第 2 大」逻辑：先取供应商第 1 大（最大值）。
+      let picked = sorted[0];
+      pickedRank = 1;
+      pickedLabel = "第1大";
 
-    // 出给客户 = 供应商选数箱规 + 放大最短边 +1 作安全余量（尽量不放大最大边）。
-    // 约束：放大后材积重 − 客户材积重 < 2、计费重不超过历史最大；不满足则不放大。
-    const amp = amplifyDims(
-      picked.lengthCm,
-      picked.widthCm,
-      picked.heightCm,
-      maxActual,
-      c.volumeWeight,
-      historyMax ? historyMax.chargeableWeight : null,
-    );
-    const ampVolumeWeight = calcVolumeWeight(amp.lengthCm, amp.widthCm, amp.heightCm);
+      // 中位数兜底：第 1 大对比客户差异超限（三边和差 ≥ 6 或 材积重差 ≥ 2）→ 改取中位数（第 ceil(N/2) 大）
+      const firstSumSides = sumSides(picked.lengthCm, picked.widthCm, picked.heightCm);
+      if (
+        Math.abs(firstSumSides - c.sumSides) >= SUM_SIDES_THRESHOLD ||
+        Math.abs(picked.volumeWeight - c.volumeWeight) >= VOLUME_DIFF_THRESHOLD
+      ) {
+        const medianRank = Math.ceil(sorted.length / 2);
+        picked = sorted[medianRank - 1];
+        pickedRank = medianRank;
+        pickedLabel = "中位数";
+      }
 
-    const suggestion: SuggestionRow["suggestion"] = {
-      lengthCm: amp.lengthCm,
-      widthCm: amp.widthCm,
-      heightCm: amp.heightCm,
-      actualWeight: maxActual,
-      volumeWeight: ampVolumeWeight,
-      chargeableWeight: Math.max(maxActual, ampVolumeWeight),
-      sumSides: sumSides(amp.lengthCm, amp.widthCm, amp.heightCm),
-    };
-    const pickedRank: number | null = sorted.indexOf(picked) + 1;
+      // 出给客户选了供应商箱（第 1 大 / 中位数），供应商列展示同一箱
+      supplier = makeSupplierRepresentative(group, picked);
+      supplierChargeable = picked.chargeableWeight;
 
-    // 差异校验（供应商原始箱规 vs 客户申报，区分材积主导 / 实重主导），超限报警提示核查过机图。
-    const supplierSumSides = sumSides(supplier.lengthCm, supplier.widthCm, supplier.heightCm);
-    if (supplier.volumeWeight >= supplier.actualWeight) {
+      // 出给客户 = 选中箱规 + 放大最短边 +1 作安全余量（历史可用时才约束不超过历史最大）
+      const amp = amplifyDims(
+        picked.lengthCm,
+        picked.widthCm,
+        picked.heightCm,
+        supplier.actualWeight,
+        c.volumeWeight,
+        historyChargeable,
+      );
+      const ampVolumeWeight = calcVolumeWeight(amp.lengthCm, amp.widthCm, amp.heightCm);
+      suggestion = {
+        lengthCm: amp.lengthCm,
+        widthCm: amp.widthCm,
+        heightCm: amp.heightCm,
+        actualWeight: supplier.actualWeight,
+        volumeWeight: ampVolumeWeight,
+        chargeableWeight: Math.max(supplier.actualWeight, ampVolumeWeight),
+        sumSides: sumSides(amp.lengthCm, amp.widthCm, amp.heightCm),
+      };
+    }
+
+    // 差异校验（出给客户建议值 vs 客户申报，区分材积主导 / 实重主导），超限报警提示核查过机图。
+    // 基准用最终「出给客户」值而非供应商第 1 大：出给客户已满足条件（差异在阈值内）时不再报超限。
+    const suggestionSumSides = suggestion.sumSides;
+    if (suggestion.volumeWeight >= suggestion.actualWeight) {
       // 材积主导（体积重 ≥ 实际重量）：查三边和差、材积重差
-      if (Math.abs(supplierSumSides - c.sumSides) >= SUM_SIDES_THRESHOLD) {
+      if (Math.abs(suggestionSumSides - c.sumSides) >= SUM_SIDES_THRESHOLD) {
         alarms.push("三边和差异超限，请核查过机图");
       }
-      if (Math.abs(supplier.volumeWeight - c.volumeWeight) >= VOLUME_DIFF_THRESHOLD) {
+      if (Math.abs(suggestion.volumeWeight - c.volumeWeight) >= VOLUME_DIFF_THRESHOLD) {
         alarms.push("材积重差异超限，请核查过机图");
       }
     } else {
       // 实重主导（体积重 < 实际重量）：查实重差
-      if (Math.abs(supplier.actualWeight - c.actualWeight) >= ACTUAL_DIFF_THRESHOLD) {
+      if (Math.abs(suggestion.actualWeight - c.actualWeight) >= ACTUAL_DIFF_THRESHOLD) {
         alarms.push("实重差异超限，请核查过机图");
       }
     }
@@ -716,25 +792,13 @@ export function buildSuggestions(
       alarms.push("供应商存在过大箱，请核查过机图");
     }
 
-    // 供应商小于客户：单独提示，并取历史最大值（若有）作为出给客户建议，
-    // 避免出给客户比客户申报还小（供应商装箱偏小 → 参考历史合理值）。
-    // 用供应商真实最大计费重（第 1 大箱 supplierChargeable）判断，与前端「供应商计费重」列一致；
-    // 不能用选数命中箱规（退选第 2 大时其计费重可能 < 客户，会误报）。
-    if (supplierChargeable < c.chargeableWeight) {
-      alarms.push("供应商计费重小于客户，请确认");
-      if (historyMax) {
-        suggestion.lengthCm = historyMax.lengthCm;
-        suggestion.widthCm = historyMax.widthCm;
-        suggestion.heightCm = historyMax.heightCm;
-        suggestion.actualWeight = historyMax.actualWeight;
-        suggestion.volumeWeight = historyMax.volumeWeight;
-        suggestion.chargeableWeight = historyMax.chargeableWeight;
-        suggestion.sumSides = sumSides(historyMax.lengthCm, historyMax.widthCm, historyMax.heightCm);
-      }
+    // 建议出给客户计费重 < 客户计费重：单独提示（黄色，见前端）。
+    if (suggestion.chargeableWeight < c.chargeableWeight) {
+      alarms.push("建议数据计费重小于客户，请确认");
     }
 
-    // 历史对比：历史最大值 > 建议值 → 提示可参考历史最大值放大
-    if (historyMax && historyMax.chargeableWeight > suggestion.chargeableWeight) {
+    // 历史对比：历史最大值 > 建议值 → 提示可参考历史最大值放大（仅历史可用时，建议 2）
+    if (historyMax && historyUsable && historyMax.chargeableWeight > suggestion.chargeableWeight) {
       alarms.push("建议参考历史最大值放大");
     }
 
@@ -750,12 +814,28 @@ export function buildSuggestions(
       customer,
       supplier,
       supplierChargeable,
+      supplierFbaTotalChargeable,
       supplierMaxVolumeWeight,
       suggestion,
       alarms,
       historyMax,
       pickedRank,
+      pickedLabel,
     });
+  }
+
+  // 按 FBA 号聚合：出给客户总计费重 vs 供应商该 FBA 号总计费重，负差提示成本重过大（紫色）。
+  const fbaSuggestTotal = new Map<string, number>();
+  for (const r of rows) {
+    if (r.pickedLabel === null) continue;
+    fbaSuggestTotal.set(r.fbaId, (fbaSuggestTotal.get(r.fbaId) ?? 0) + r.suggestion.chargeableWeight * r.totalBoxes);
+  }
+  for (const r of rows) {
+    if (r.pickedLabel === null) continue;
+    const suggestTotal = fbaSuggestTotal.get(r.fbaId) ?? 0;
+    if (suggestTotal - r.supplierFbaTotalChargeable < 0) {
+      r.alarms.push("成本重过大，请和供应商申请");
+    }
   }
 
   return { rows, supplierTotal };
@@ -1045,8 +1125,9 @@ export async function exportHistoryBuffer(history: HistoryLibrary): Promise<Buff
 export async function exportOutputBuffer(
   rows: SuggestionRow[],
   supplierTotal: number,
-): Promise<Buffer> {
-  // 全局兜底校验
+): Promise<{ buffer: Buffer; warning: string | null }> {
+  // 全局兜底校验：出给客户总重 ≤ 供应商总重时，尝试放大（受差异约束限制）。
+  let warning: string | null = null;
   const customerTotal = rows.reduce(
     (s, r) => s + r.suggestion.chargeableWeight * r.totalBoxes,
     0,
@@ -1054,8 +1135,16 @@ export async function exportOutputBuffer(
   if (rows.length > 0 && customerTotal > 0 && customerTotal <= supplierTotal) {
     const ratio = (supplierTotal / customerTotal) * AMPLIFY_RATIO;
     for (const r of rows) {
-      forceAmplify(r.suggestion, r.suggestion.chargeableWeight * ratio);
+      forceAmplify(r.suggestion, r.customer, r.suggestion.chargeableWeight * ratio);
       r.alarms.push("[全局调整]");
+    }
+    // 放大后重新计算总重：若差异约束挡住导致仍 < 供应商总重，提示可能亏损
+    const amplifiedTotal = rows.reduce(
+      (s, r) => s + r.suggestion.chargeableWeight * r.totalBoxes,
+      0,
+    );
+    if (amplifiedTotal < supplierTotal) {
+      warning = "出给客户总计费重小于供应商总计费重，可能亏损，请留意！";
     }
   }
 
@@ -1094,11 +1183,12 @@ export async function exportOutputBuffer(
     rCharge: 33, // AG 出给客户计费重(公式)
     rTotCharge: 34, // AH 出给客户总计费重(公式)
     costKg: 35, // AI 成本KG
-    remark: 36, // AJ 备注（无表头）
-    channel2: 37, // AK 渠道
-    boxes: 38, // AL 箱数
-    totCharge: 39, // AM 总计费重
-    totCost: 40, // AN 总成本重
+    pickedLabel: 36, // AJ 选中名次
+    remark: 37, // AK 备注（无表头）
+    channel2: 38, // AL 渠道
+    boxes: 39, // AM 箱数
+    totCharge: 40, // AN 总计费重
+    totCost: 41, // AO 总成本重
   };
 
   const colLetter = (n: number): string => {
@@ -1179,6 +1269,7 @@ export async function exportOutputBuffer(
     [C.rCharge, "计费重"],
     [C.rTotCharge, "总计费重"],
     [C.costKg, "成本KG"],
+    [C.pickedLabel, "选中名次"],
     [C.channel2, "渠道"],
     [C.boxes, "箱数"],
     [C.totCharge, "总计费重"],
@@ -1188,8 +1279,8 @@ export async function exportOutputBuffer(
   for (const [col, label] of headerLabels) {
     headerRow.getCell(col).value = label;
   }
-  // 表头样式：主体灰蓝 FFADB9CA、分隔列(O=15/X=24)浅绿 FFE2F0D9、尾列(AK-AN)蓝 FF5B9BD5、备注(AJ)无填充无边框
-  for (let c = 1; c <= 40; c++) {
+  // 表头样式：主体灰蓝 FFADB9CA、分隔列(O=15/X=24)浅绿 FFE2F0D9、尾列(AL-AO)蓝 FF5B9BD5、备注(AK)无填充无边框
+  for (let c = 1; c <= 41; c++) {
     const cell = headerRow.getCell(c);
     cell.alignment = CENTER;
     if (c >= C.channel2 && c <= C.totCost) {
@@ -1293,6 +1384,9 @@ export async function exportOutputBuffer(
     row.getCell(C.rTotVol).value = formula(`${L(C.rVol)}${rn}*${L(C.totalBoxes)}${rn}`);
     row.getCell(C.rCharge).value = formula(`ROUND(MAX(${L(C.rTotAct)}${rn},${L(C.rTotVol)}${rn}),0)`);
 
+    // 选中名次（AJ）
+    row.getCell(C.pickedLabel).value = r.pickedLabel ?? "";
+
     // 备注 = 报警（无表头列）
     if (r.alarms.length > 0) {
       row.getCell(C.remark).value = r.alarms.join("；");
@@ -1352,16 +1446,16 @@ export async function exportOutputBuffer(
     [13, 8.49], [14, 8.99], [15, 1.76], [16, 8.99], [17, 8.99], [18, 8.99],
     [19, 8.99], [20, 8.99], [21, 8.99], [22, 8.99], [23, 9.38], [24, 2.39],
     [25, 8.99], [26, 8.99], [27, 8.99], [28, 8.99], [29, 14.75], [30, 8.99],
-    [31, 8.99], [32, 9.38], [33, 8.99], [34, 8.99], [35, 7.62], [36, 25.47],
-    [37, 31.35], [38, 8.99], [39, 12.61], [40, 12.6],
+    [31, 8.99], [32, 9.38], [33, 8.99], [34, 8.99], [35, 7.62], [36, 10],
+    [37, 25.47], [38, 31.35], [39, 8.99], [40, 12.61], [41, 12.6],
   ];
   for (const [col, w] of widths) ws.getColumn(col).width = w;
 
-  // ---- 统一字体/对齐/边框（数据区 R3 起：宋体 11 黑、居中、细黑边框；合计行与备注列 AJ 无边框；表头 R2 样式已单独设置）----
+  // ---- 统一字体/对齐/边框（数据区 R3 起：宋体 11 黑、居中、细黑边框；合计行与备注列 AK 无边框；表头 R2 样式已单独设置）----
   for (let rn = 3; rn <= totalRow; rn++) {
     const rw = ws.getRow(rn);
     const isTotal = rn === totalRow;
-    for (let c = 1; c <= 40; c++) {
+    for (let c = 1; c <= 41; c++) {
       const cell = rw.getCell(c);
       cell.font = FONT;
       cell.alignment = CENTER;
@@ -1379,5 +1473,50 @@ export async function exportOutputBuffer(
     rw.getCell(C.rCharge).numFmt = "0_";
   }
 
-  return Buffer.from(await wb.xlsx.writeBuffer());
+  // ---- 高亮样式（在统一字体/边框之后设置，避免被 cell.font = FONT 覆盖）----
+  const RED_FONT = { name: "宋体", size: 11, color: { argb: "FFFF0000" } };
+  const FILL_YELLOW_STRONG = FILL("FFFFFF00");
+  const FILL_RED = FILL("FFFFC7CE");
+  const FILL_YELLOW = FILL("FFFFEB9C");
+  const FILL_BLUE = FILL("FFDDEBF7");
+  const FILL_PURPLE = FILL("FFD9C2F0");
+  for (let i = 0; i < data.length; i++) {
+    const r = data[i];
+    const rn = dataStart + i;
+    const rw = ws.getRow(rn);
+    const hasSupplier = r.supplier.lengthCm > 0;
+
+    // Y 列（差异 = 客户材积重 − 出给客户材积重）差异绝对值 ≥ 2 标黄
+    const customerVol = calcVolumeWeight(r.customer.lengthCm, r.customer.widthCm, r.customer.heightCm);
+    const suggestionVol = calcVolumeWeight(r.suggestion.lengthCm, r.suggestion.widthCm, r.suggestion.heightCm);
+    if (Math.abs(round2(customerVol - suggestionVol)) >= 2) {
+      rw.getCell(C.diff2).fill = FILL_YELLOW_STRONG;
+    }
+
+    // 出给客户 vs 供应商 对比不同 → 出给客户列（Z/AA/AB/AC）红字
+    if (hasSupplier) {
+      if (r.suggestion.lengthCm !== r.supplier.lengthCm) rw.getCell(C.rLen).font = RED_FONT;
+      if (r.suggestion.widthCm !== r.supplier.widthCm) rw.getCell(C.rWid).font = RED_FONT;
+      if (r.suggestion.heightCm !== r.supplier.heightCm) rw.getCell(C.rHei).font = RED_FONT;
+      if (r.suggestion.actualWeight !== r.supplier.actualWeight) rw.getCell(C.rAct).font = RED_FONT;
+    }
+
+    // AJ 备注底色（紫 > 红 > 黄 > 蓝）
+    const remarkCell = rw.getCell(C.remark);
+    const hasPurple = r.alarms.some((a) => a.includes("成本重过大"));
+    const hasRed = r.alarms.some((a) => a.includes("核查过机图"));
+    const hasYellow = r.alarms.some(
+      (a) => a.includes("需人工复核") || a.includes("需人工确认") || a.includes("建议数据计费重小于客户"),
+    );
+    const hasBlue = r.alarms.some((a) => a.includes("建议参考历史"));
+    if (hasPurple) remarkCell.fill = FILL_PURPLE;
+    else if (hasRed) remarkCell.fill = FILL_RED;
+    else if (hasYellow) remarkCell.fill = FILL_YELLOW;
+    else if (hasBlue) remarkCell.fill = FILL_BLUE;
+  }
+
+  return {
+    buffer: Buffer.from(await wb.xlsx.writeBuffer()),
+    warning,
+  };
 }

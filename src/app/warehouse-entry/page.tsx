@@ -49,32 +49,151 @@ function recompute(s: SuggestionRow["suggestion"]): SuggestionRow["suggestion"] 
 
 /** 依据当前建议值实时重算报警（阈值与服务端 buildSuggestions 一致，供应商原始箱规 vs 客户） */
 function recomputeAlarms(r: SuggestionRow): string[] {
-  // 未匹配行（pickedRank 为 null）：保留人工复核提示
-  if (r.pickedRank === null) return ["⚠需人工复核"];
+  // 未匹配行（pickedLabel 为 null）：保留人工复核提示
+  if (r.pickedLabel === null) return ["⚠需人工复核"];
   const alarms: string[] = [];
-  const supplierSumSides = round2(r.supplier.lengthCm + r.supplier.widthCm + r.supplier.heightCm);
-  if (r.supplier.volumeWeight >= r.supplier.actualWeight) {
+  const suggestionSumSides = round2(r.suggestion.lengthCm + r.suggestion.widthCm + r.suggestion.heightCm);
+  if (r.suggestion.volumeWeight >= r.suggestion.actualWeight) {
     // 材积主导：查三边和差、材积重差
-    if (Math.abs(supplierSumSides - r.customer.sumSides) >= 6) {
+    if (Math.abs(suggestionSumSides - r.customer.sumSides) >= 6) {
       alarms.push("三边和差异超限，请核查过机图");
     }
-    if (Math.abs(r.supplier.volumeWeight - r.customer.volumeWeight) >= 2) {
+    if (Math.abs(r.suggestion.volumeWeight - r.customer.volumeWeight) >= 2) {
       alarms.push("材积重差异超限，请核查过机图");
     }
   } else {
     // 实重主导：查实重差
-    if (Math.abs(r.supplier.actualWeight - r.customer.actualWeight) >= 0.5) {
+    if (Math.abs(r.suggestion.actualWeight - r.customer.actualWeight) >= 0.5) {
       alarms.push("实重差异超限，请核查过机图");
     }
   }
   if (r.supplierMaxVolumeWeight - r.suggestion.volumeWeight >= 2) {
     alarms.push("供应商存在过大箱，请核查过机图");
   }
-  if (r.historyMax && r.historyMax.chargeableWeight > r.suggestion.chargeableWeight) {
-    alarms.push("建议参考历史最大值放大");
+  // 建议出给客户计费重 < 客户计费重 → 提示（黄色）
+  if (r.suggestion.chargeableWeight < r.customer.chargeableWeight) {
+    alarms.push("建议数据计费重小于客户，请确认");
+  }
+  // 历史可用性（建议 2）：历史「出给客户」值 vs 客户 三边和差 < 6 且 体积重差 < 2 才提示参考历史
+  if (r.historyMax) {
+    const historySumSides = round2(r.historyMax.lengthCm + r.historyMax.widthCm + r.historyMax.heightCm);
+    const historyUsable =
+      Math.abs(historySumSides - r.customer.sumSides) < 6 &&
+      Math.abs(r.historyMax.volumeWeight - r.customer.volumeWeight) < 2;
+    if (historyUsable && r.historyMax.chargeableWeight > r.suggestion.chargeableWeight) {
+      alarms.push("建议参考历史最大值放大");
+    }
   }
   return alarms;
 }
+
+/** 按 FBA 号重算「成本重过大」提醒：出给客户总计费重 vs 供应商该 FBA 号总计费重，负差则加紫色提醒 */
+function recomputeCostAlarms(rows: SuggestionRow[]): SuggestionRow[] {
+  const COST_ALARM = "成本重过大，请和供应商申请";
+  const fbaSuggestTotal = new Map<string, number>();
+  for (const r of rows) {
+    if (r.pickedLabel === null) continue;
+    fbaSuggestTotal.set(
+      r.fbaId,
+      (fbaSuggestTotal.get(r.fbaId) ?? 0) + r.suggestion.chargeableWeight * r.totalBoxes,
+    );
+  }
+  return rows.map((r) => {
+    if (r.pickedLabel === null) return r;
+    const alarms = r.alarms.filter((a) => a !== COST_ALARM);
+    const suggestTotal = fbaSuggestTotal.get(r.fbaId) ?? 0;
+    if (suggestTotal - r.supplierFbaTotalChargeable < 0) {
+      alarms.push(COST_ALARM);
+    }
+    return { ...r, alarms };
+  });
+}
+
+// ============================================================
+// 报警说明（点击「报警说明」查看的解读文案）
+// ============================================================
+
+type AlarmTone = "amber" | "red" | "blue" | "purple" | "gray";
+
+const ALARM_TONE: Record<AlarmTone, string> = {
+  amber: "bg-amber-100 text-amber-700",
+  red: "bg-red-600 text-white",
+  blue: "bg-blue-100 text-blue-700",
+  purple: "bg-purple-600 text-white",
+  gray: "bg-zinc-100 text-zinc-600",
+};
+
+const ALARM_HELP: {
+  text: string;
+  tone: AlarmTone;
+  condition: string;
+  example: string;
+  meaning: string;
+}[] = [
+  {
+    text: "⚠需人工复核",
+    tone: "amber",
+    condition: "该 FBA 号在供应商货箱清单里找不到对应箱子，系统无法自动选数。",
+    example: "客户有 FBA19XXXX，但供应商清单里没有该 FBA 号的箱 → 出给客户沿用客户原值并标注。",
+    meaning: "提醒人工介入，手动核对并填写出给客户的箱规。",
+  },
+  {
+    text: "三边和差异超限，请核查过机图",
+    tone: "red",
+    condition: "材积主导（材积重 ≥ 实重）时，|出给客户三边和 − 客户三边和| ≥ 6 cm。",
+    example: "客户 40+30+25=95，出给客户 45+35+30=110，差 15 ≥ 6 → 报警。",
+    meaning: "建议箱子的总边长明显偏离客户申报，可能体积数据不符，需查过机图核实。",
+  },
+  {
+    text: "材积重差异超限，请核查过机图",
+    tone: "red",
+    condition: "材积主导时，|出给客户材积重 − 客户材积重| ≥ 2 kg。",
+    example: "客户材积重 5.0kg，出给客户 7.5kg，差 2.5 ≥ 2 → 报警。",
+    meaning: "建议材积重比客户申报重太多，会推高计费重，需核实过机数据。",
+  },
+  {
+    text: "实重差异超限，请核查过机图",
+    tone: "red",
+    condition: "实重主导（材积重 < 实重）时，|出给客户实重 − 客户实重| ≥ 0.5 kg。",
+    example: "客户实重 3.0kg，出给客户 3.6kg，差 0.6 ≥ 0.5 → 报警。",
+    meaning: "重货的实重比客户申报重了 0.5kg 以上，需核实过机重量。",
+  },
+  {
+    text: "供应商存在过大箱，请核查过机图",
+    tone: "red",
+    condition: "供应商该 FBA 号下最大箱的材积重 − 出给客户材积重 ≥ 2 kg。",
+    example: "某 FBA 号 10 箱，供应商最大箱材积重 15kg，出给客户 12kg，差 3 ≥ 2 → 报警。",
+    meaning: "供应商货里混进了明显偏大的异常箱，即使建议值取自其它箱，也提示查供应商过机图核实。",
+  },
+  {
+    text: "建议数据计费重小于客户，请确认",
+    tone: "amber",
+    condition: "出给客户计费重 < 客户申报计费重。",
+    example: "客户计费重 8kg，出给客户建议 7kg → 报警。",
+    meaning: "建议值比客户自己报的还小，可能少计费，需确认是否采纳。",
+  },
+  {
+    text: "建议参考历史最大值放大",
+    tone: "blue",
+    condition: "历史同款可用（历史 vs 客户：三边和差 <6 且 材积重差 <2）且历史最大计费重 > 出给客户计费重。",
+    example: "历史同款曾取 10kg，本次出给客户 8kg → 提示可参考放大。",
+    meaning: "历史上同类货曾取到更大值，本次可能偏保守，提示可参考历史放大。",
+  },
+  {
+    text: "成本重过大，请和供应商申请",
+    tone: "purple",
+    condition: "同一 FBA 号，出给客户总计费重 − 供应商该 FBA 号总计费重 < 0（负差）。",
+    example: "某 FBA 号出给客户总重 500kg，供应商实际 560kg，差 −60 < 0 → 报警。",
+    meaning: "给客户报的计费重低于供应商实际收我们的计费重，这票可能亏损，需找供应商申请。",
+  },
+  {
+    text: "[全局调整]（导出时标记）",
+    tone: "gray",
+    condition: "整单出给客户总计费重 ≤ 供应商总计费重时，导出前等比例放大（受差异约束限制）。",
+    example: "整单出给客户 1000kg ≤ 供应商 1100kg → 触发，导出备注标 [全局调整]。",
+    meaning: "防止整单给客户的计费重低于供应商成本；若放大后仍不足，导出时弹窗提示可能亏损。",
+  },
+];
 
 // ============================================================
 // Page
@@ -93,6 +212,7 @@ export default function WarehouseEntryPage() {
   const [historyCount, setHistoryCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [showAlarmHelp, setShowAlarmHelp] = useState(false);
   const customerInputRef = useRef<HTMLInputElement>(null);
   const supplierInputRef = useRef<HTMLInputElement>(null);
   const historyInputRef = useRef<HTMLInputElement>(null);
@@ -162,13 +282,14 @@ export default function WarehouseEntryPage() {
   // 编辑建议长/宽/高/实重（重算材积重/计费重/三边和，并实时重算报警）
   const editSuggestion = useCallback(
     (index: number, field: keyof SuggestionRow["suggestion"], value: number) => {
-      setRows((prev) =>
-        prev.map((r, i) => {
+      setRows((prev) => {
+        const nextRows = prev.map((r, i) => {
           if (i !== index) return r;
           const next = { ...r, suggestion: recompute({ ...r.suggestion, [field]: value }) };
           return { ...next, alarms: recomputeAlarms(next) };
-        })
-      );
+        });
+        return recomputeCostAlarms(nextRows);
+      });
     },
     []
   );
@@ -193,6 +314,8 @@ export default function WarehouseEntryPage() {
         return;
       }
 
+      const warningHeader = res.headers.get("X-Warning");
+
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -203,6 +326,11 @@ export default function WarehouseEntryPage() {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+
+      if (warningHeader) {
+        // 全局兜底放大后总重仍不足：弹出可能亏损提示
+        window.alert(decodeURIComponent(warningHeader));
+      }
 
       setNotice("已导出，并已累积到历史库");
     } catch (err) {
@@ -385,6 +513,12 @@ export default function WarehouseEntryPage() {
 
           <div className="rounded-lg border border-zinc-200 bg-white p-4 text-sm text-zinc-500">
             <p>💡 提示：系统按「FBA ID（供应商货箱编号前 12 位）」匹配箱组，自动选数并校验计费重，生成建议箱规。结果可手动微调后再导出。</p>
+            <button
+              onClick={() => setShowAlarmHelp(true)}
+              className="mt-2 inline-flex items-center gap-1.5 text-sm font-medium text-primary hover:underline"
+            >
+              📖 报警说明
+            </button>
           </div>
         </div>
       )}
@@ -435,6 +569,16 @@ export default function WarehouseEntryPage() {
             </div>
           </div>
 
+          {/* 报警说明入口 */}
+          <div className="flex justify-end">
+            <button
+              onClick={() => setShowAlarmHelp(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 hover:border-primary hover:text-primary transition-colors"
+            >
+              <span className="text-sm">📖</span> 报警说明
+            </button>
+          </div>
+
           {/* 全局校验条 */}
           <div
             className={`flex items-center justify-between gap-4 rounded-lg border p-4 ${
@@ -459,7 +603,7 @@ export default function WarehouseEntryPage() {
             </div>
             {globalWarn && (
               <span className="rounded-full bg-red-100 px-3 py-1 text-xs font-semibold text-red-700">
-                ⚠ 导出时将自动等比例放大并标注 [全局调整]
+                ⚠ 出给客户总重偏小，导出时将尝试放大（受差异约束），仍不足会提示可能亏损
               </span>
             )}
           </div>
@@ -580,11 +724,21 @@ export default function WarehouseEntryPage() {
                         )}
                       </td>
                       <td className="px-3 py-2 text-center font-mono text-xs">
-                        {r.pickedRank === null ? (
+                        {r.pickedLabel === null ? (
                           <span className="text-zinc-400">—</span>
                         ) : (
-                          <span className={r.pickedRank === 1 ? "text-zinc-500" : "font-semibold text-amber-600"}>
-                            第{r.pickedRank}大
+                          <span
+                            className={
+                              r.pickedLabel === "第1大"
+                                ? "text-zinc-500"
+                                : r.pickedLabel === "历史数值"
+                                  ? "font-semibold text-blue-600"
+                                  : r.pickedLabel === "中位数"
+                                    ? "font-semibold text-violet-600"
+                                    : "font-semibold text-amber-600"
+                            }
+                          >
+                            {r.pickedLabel}
                           </span>
                         )}
                       </td>
@@ -600,13 +754,15 @@ export default function WarehouseEntryPage() {
                               <span
                                 key={ai}
                                 className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${
-                                  a.includes("需人工复核") || a.includes("需人工确认")
-                                    ? "bg-amber-100 text-amber-700"
-                                    : a.includes("建议参考历史")
-                                      ? "bg-blue-100 text-blue-700"
-                                      : a.includes("核查过机图")
-                                        ? "bg-red-600 text-white"
-                                        : "bg-red-100 text-red-700"
+                                  a.includes("成本重过大")
+                                    ? "bg-purple-600 text-white"
+                                    : a.includes("需人工复核") || a.includes("需人工确认") || a.includes("建议数据计费重小于客户")
+                                      ? "bg-amber-100 text-amber-700"
+                                      : a.includes("建议参考历史")
+                                        ? "bg-blue-100 text-blue-700"
+                                        : a.includes("核查过机图")
+                                          ? "bg-red-600 text-white"
+                                          : "bg-red-100 text-red-700"
                                 }`}
                               >
                                 {a}
@@ -651,6 +807,60 @@ export default function WarehouseEntryPage() {
         onChange={handleHistoryImport}
         className="hidden"
       />
+
+      {/* 报警说明弹窗 */}
+      {showAlarmHelp && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => setShowAlarmHelp(false)}
+        >
+          <div
+            className="flex max-h-[85vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-zinc-200 px-6 py-4">
+              <h2 className="text-lg font-bold text-deep">报警说明</h2>
+              <button
+                onClick={() => setShowAlarmHelp(false)}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 transition-colors"
+                aria-label="关闭"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="space-y-4 overflow-y-auto px-6 py-5">
+              <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-4 text-xs leading-relaxed text-zinc-600">
+                <p className="mb-1 font-semibold text-zinc-700">口径说明</p>
+                <p>三边和 = 长 + 宽 + 高；材积重 = 长 × 宽 × 高 ÷ 6000；计费重 = max(实重, 材积重)。</p>
+                <p>客户申报 = 客户上传数据；出给客户 = 系统建议值；供应商 = 供应商货箱清单实际数据。</p>
+              </div>
+              {ALARM_HELP.map((a) => (
+                <div key={a.text} className="rounded-lg border border-zinc-200 p-4">
+                  <div className="mb-2">
+                    <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-semibold ${ALARM_TONE[a.tone]}`}>
+                      {a.text}
+                    </span>
+                  </div>
+                  <dl className="space-y-1.5 text-sm">
+                    <div>
+                      <dt className="inline font-medium text-zinc-700">表达的意思：</dt>
+                      <dd className="inline text-zinc-600">{a.condition}</dd>
+                    </div>
+                    <div>
+                      <dt className="inline font-medium text-zinc-700">举例：</dt>
+                      <dd className="inline text-zinc-600">{a.example}</dd>
+                    </div>
+                    <div>
+                      <dt className="inline font-medium text-zinc-700">含义说明：</dt>
+                      <dd className="inline text-zinc-600">{a.meaning}</dd>
+                    </div>
+                  </dl>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
