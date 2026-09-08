@@ -1137,6 +1137,18 @@ interface PacificSplitResult {
     - 处理：首页文本为空时用 `_ocr_page_to_words(page)` OCR 首页再判断类型（复用 RapidOCR，模型有全局缓存不重复加载）；有文字层的正常 PDF 不受影响、不额外耗时
     - 位置：`bl-service/core.py`（`_declaration_kind`）
 
+78. **RapidOCR 依赖 opencv，slim 镜像缺 libGL 等图形库 → 扫描件 OCR 静默失败** (2026-09-08)
+    - 症状：线上 Sealos 部署后，扫描件 extract 返回 `ok:true` 但提单号/箱数等字段全空（本地正常）；后端日志无任何报错（`_ocr_page_to_words` 的 `except Exception: return []` 静默吞掉）
+    - 根因：`rapidocr_onnxruntime` 依赖 `opencv-python`，其 `cv2` 在 `python:3.11-slim` 里 import 时报 `ImportError: libGL.so.1: cannot open shared object file`（缺 libgl1 等图形库）；onnxruntime 另需 `libgomp1`（OpenMP 运行时）
+    - 处理：`bl-service/Dockerfile` 补 `libgomp1 libgl1 libglib2.0-0 libsm6 libxrender1 libxext6`；排查方法 `kubectl exec deploy/etton-bl-service -- python -c "from rapidocr_onnxruntime import RapidOCR"`
+    - 位置：`bl-service/Dockerfile`
+
+79. **bl-service 以 root 运行触发 PodSecurity `restricted` 警告；LibreOffice javaldx 警告无害** (2026-09-08)
+    - 症状：`kubectl apply` 时告警 `would violate PodSecurity "restricted:v1.25"`（allowPrivilegeEscalation / capabilities / runAsNonRoot / seccompProfile），当前 namespace 为 warn 模式不阻断，pod 正常运行
+    - 根因：LibreOffice headless 首次运行需写 `$HOME/.config` 建 profile，非 root 且无 HOME 时 soffice 会静默失败 → 特意用 root；`soffice` 报的 `Warning: failed to launch javaldx` 是 Java 不可用的无害警告，writer_pdf_Export 不依赖 Java
+    - 处理：暂保持 root（功能优先）；如未来 namespace 升级 enforce，需 Dockerfile 设 `ENV HOME=/tmp` + deployment 加 `runAsNonRoot/runAsUser/capabilities.drop=["ALL"]/seccompProfile`
+    - 位置：`k8s/bl-service-deploy.yaml`、`bl-service/Dockerfile`
+
 ### 待重构项
 
 - [ ] 将 session 存储从内存 Map 改为临时文件或 Redis
