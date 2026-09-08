@@ -97,6 +97,19 @@ const TOOLS: Tool[] = [
       </svg>
     ),
   },
+  {
+    href: "/warehouse-entry-full",
+    title: "TR全量入仓数据整理",
+    badge: "常用",
+    desc: "逐箱匹配、自动放大尺寸，生成全量建议箱规",
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 2 2 7l10 5 10-5-10-5Z" />
+        <path d="m2 17 10 5 10-5" />
+        <path d="m2 12 10 5 10-5" />
+      </svg>
+    ),
+  },
 ];
 
 export default function HomePage() {
@@ -118,7 +131,7 @@ export default function HomePage() {
         </h1>
         <div className="scanline" />
         <p className="mt-6 text-[17px] tracking-[.5px] text-muted">
-          六款电商效率工具，把繁琐的表格处理变成一次点击。
+          七款电商效率工具，把繁琐的表格处理变成一次点击。
         </p>
       </section>
 
