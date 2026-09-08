@@ -8,6 +8,10 @@ RUN npm ci
 
 # 构建
 COPY . .
+# BL_SERVICE_URL：提单/电放保函后端地址。next.config.ts 的 rewrite 在 build 时求值，
+# standalone 模式下运行时不可改，故通过 build-arg 在构建期固化（本地构建不传则默认 localhost:5000）。
+ARG BL_SERVICE_URL
+ENV BL_SERVICE_URL=$BL_SERVICE_URL
 RUN npm run build
 
 # ---- Production Stage ----

@@ -40,6 +40,13 @@ next-env.d.ts
 # Claude
 .claude/
 
+# bl-service (Python Flask 提单/电放保函后端)
+bl-service/workspace/
+bl-service/__pycache__/
+*.pyc
+bl-service/*.bak_*
+bl-service/_*.py
+
 # Test files
 保单拆分功能/
 public/data/

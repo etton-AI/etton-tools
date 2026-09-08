@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: etton-bl-service
+  namespace: ns-22nz9gjz
+  labels:
+    app: etton-bl-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: etton-bl-service
+  template:
+    metadata:
+      labels:
+        app: etton-bl-service
+    spec:
+      containers:
+        - name: etton-bl-service
+          image: ghcr.io/etton-ai/etton-bl-service:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 5000
+              protocol: TCP
+          # LibreOffice docx→PDF + RapidOCR onnx 模型均为重量级，内存给足避免 OOM
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: 1500m
+              memory: 2Gi
+          # 以 root 运行：LibreOffice headless 首次运行需写 HOME（/root/.config）建 profile，
+          # 非 root 且无 HOME 时 soffice 会静默失败 → docx 不转 PDF
+          readinessProbe:
+            httpGet:
+              path: /api/bl/customers
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/bl/customers
+              port: 5000
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bl-service
+  namespace: ns-22nz9gjz
+  labels:
+    app: etton-bl-service
+spec:
+  type: ClusterIP
+  selector:
+    app: etton-bl-service
+  ports:
+    - port: 5000
+      targetPort: 5000
+      protocol: TCP

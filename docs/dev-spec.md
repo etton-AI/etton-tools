@@ -591,6 +591,79 @@ interface PacificSplitResult {
 
 ---
 
+### 3.14 提单 + 电放保函 — `/bl-review`
+
+**文件**: `src/app/bl-review/page.tsx` + `bl-service/`（Python Flask 后端；docx→PDF 用**原生 LibreOffice** 转换，不依赖 Docker）
+
+#### 功能
+
+1. **批量**：点按钮选文件夹，每个子文件夹 = 一票（同一票的底单 PDF + 箱货清单 xlsx 放同一文件夹）；「物流追踪表」单独上传。底单被拆成多份（报/放/委托）自动先合并
+2. 审核表 = **提单 13 字段**（文件命名/shipper/consignee/提单号/柜号/船名航次/起运地/目的港/箱数/品名/总重量/总体积/起运日期）+ **保函 5 字段**（申请单位/运输工具/目的地/收货人(保函)/申请日期），逐格可编辑；**空白字段标红、含中文字段（申请日期除外）标红**提醒
+3. 人工核对/补填后 → 生成**提单 PDF（仅 PDF）** + **电放保函 DOCX（仅 DOC）** + **底单 PDF**，页面内预览提单/保函，再一键 ZIP 下载三份文件
+
+#### 核心业务规则
+
+- **字段提取**（`core.extract_customs_data`，横向 842×595 报关单，标签定位）：shipper=境内发货人左栏、consignee=境外收货人左栏、提单号=「提运单号」标签正下方同列值（`_value_by_label`，海运/铁路通用）、柜号=`[A-Z]{4}\d{7}` 正则（前缀 CIMU/WNGU/TIIU/TLLU 等，非参考实现的硬编码 `MATU`）、船名航次=「运输工具名称及航次号」标签紧邻下方同列值（`_value_below_label`，卡航填车架号如 `/91440112M0J494` 去开头 `/`），取不到回退备注「运输工具名称：XXX」、箱数/总重量=件数行的整数/小数、起运地/目的港=指运港行、起运日期=申报 8 位日期、品名=明细行「序号+10位商品编号+中文名」去重拼接
+- **提单模板** 12 个 MERGEFIELD 邮件合并域（`shipper/consignee/提单号/柜号/船名航次/起运地/目的港/箱数/品名/总重量/总体积/起运日期`），`clean_template.dedupe_template` 先去重重复域（如「起运日期」出现 6 次、「目的港」4 次），再用 docx-mailmerge 填域保格式不漂移
+- **保函程序重建**（`fill_telex_docx`）：TO/FROM/提单号/运输工具/**柜号**/目的地/收货人/申请单位/申请日期，逐行 `python-docx` 生成
+- **收货人(保函) 与 consignee 独立**：提单 consignee 用「大写无空格」（`HONGKONGLIXIANG...`），保函收货人用「正常大小写带空格」（`Hong Kong Lixiang...`），审核表两列独立可编辑，`build_review_excel`/`parse_review_excel` 完整回读
+- **拓锐固定 shipper/consignee（硬编码）**：该客户发货人/收货人固定不变，直接常量覆盖——`SHIPPER_BL`（3 行英文：`GUANGZHOU TUORUI TECHNOLOGY CO., LTD` + 2 行地址）、`CONSIGNEE_BL`（`HONG KONG LIXIANG TRADING COMPANY LIMITED`）；保函对应 `SHIPPER_TELEX`/`CONSIGNEE_TELEX`（正常大小写带空格）。来源=正确提单/保函，取值见 `core.py` 顶部常量
+- **箱货清单（可选上传，参考箱单发票）**：`parse_packing_list(xlsx)` 定位「英文品名/中文品名/体积/货箱重量/FBA ID/客户渠道」表头（跳过表头行，避免表头字被当成品名），英文品名去重后覆盖提单「品名」（每行一个品名）、「体积」列求和覆盖「总体积(CBM)」（**无「体积」列时回退「长×宽×高×总箱数/1e6」**）、FBA ID 去重供物流追踪表匹配、「客户渠道」列取首个非空值供渠道→目的港映射；`/api/bl/extract` 额外接受 `packing=` xlsx，响应加 `warning`（解析失败为非阻断提示，仍返回底单提取结果）
+- **周汇总箱货清单（可选，整周一份）**：用户按周导出的整份箱货清单（多票合并一个 xlsx），`parse_packing_list_weekly(xlsx)` 按「工作号」列分组（每组=国家/渠道/箱数/重量/品名/体积），`match_weekly_packing(rec, groups)` 用「运抵国 + 件数(箱数) + 毛重」回溯匹配每票底单对应的**一个或多个工作号**（一票合并报关常对应多工作号，凑箱数 + 验重量容差 1.0kg），命中则覆盖品名/总体积/渠道/箱数/国家。匹配失败回退文件夹内单票清单（`packing_{i}`）。`extract-batch` 额外接受 `weekly_packing=` xlsx
+- **物流追踪表（可选上传）**：`parse_tracking_list(xlsx)` 遍历所有 sheet（2023/2024/2025/最新物流动态/10月），按表头文字定位「Shipment ID（FBA号）」与「ETD 开船日」列，合并成 `FBA ID → ETD` 索引。用箱货清单的 FBA ID 匹配后，`ETD 开船日`（如 `2026-05-14`）覆盖提单「起运日期」（ON BOARD 日期），匹配不到则回退底单申报日期。**「船名航次」维持底单提取，不用物流追踪表**（用户决策）。`/api/bl/extract` 额外接受 `tracking=` xlsx
+- **港口英文（中文名查表 + 渠道查表，双映射自动记忆）**：①`port_map.json`（中文港口→英文，如「盐田」→`YANTIAN`），`apply_port_map` 把「起运地/目的港」按中文名转英文；②`channel_map.json`（客户渠道→目的港英文，如「易·22日达卡派包税」→`LONG BEACH,CA`、「易·15日达卡派包税」→`LOS ANGELES,CA`），`apply_channel_map` 按箱货清单「客户渠道」覆盖目的港（比中文港口名更精确）。extract 里先 `apply_port_map` 后 `apply_channel_map`（渠道命中则覆盖）；generate 里 `remember_ports` + `remember_channels` 把人工修正后的中→英/渠道→港新映射回写 json（自动积累，免手工维护对照表）
+- **品名翻译兜底**：未上传箱货清单时，底单中文品名经 `PRODUCT_EN_MAP`（灯具词典）翻译成英文并大写换行；上传箱货清单则直接用其英文品名（权威，含 `Cilp` 等源数据原始拼写）。提单品名**保留空格**（`CILP TABLE LAMP` 原样，不连写——正确提单本身是带空格的，早期「连写去空格」是误解已回退）
+- **扫描件 OCR 兜底**：无文字层的扫描底单 `extract_words` 返回空 → 走 RapidOCR（`_get_ocr` + `_ocr_page_to_words`）识别文字后复用同一套「标签定位」提取；扫描报关单多为竖版 594×843 而内容横排，OCR 前先 `np.rot90(arr, k=1)` 逆时针转正；OCR 失败才回退 `_empty_record()` 全空字段供人工填写
+- **拆分底单合并**（`merge_declaration_pdfs`，pypdf）：按文件名关键词排序 `报(报关单)→放(放行单)→委托(委托书)` 后合并。⚠️ 上传保存时必须**保留原始文件名**（`batch_{i}_{j}_{stamp}_{原文件名}.pdf`），否则排序 key 丢失会误把委托书当第一页
+- **命名规则**（`derive_output_name`）：把文件夹名里的「易通报关资料」替换成「提单/保函/底单」，其余严格照抄。例 `7月第1周-(易通报关资料）-BG20260703003 4票 英国快铁不包税-卡派 39箱 是8` → `7月第1周-(提单）-BG20260703003 4票 英国快铁不包税-卡派 39箱 是8`
+- **箱数/国家一致性校验**（`validate_ticket`）：对比 报关底单（箱数/运抵国）vs 箱货清单（`总箱数(CTN)` 求和 / `国家` 列）vs 文件夹名（`N箱` / 国家），三者有值且互相不同则 warning「原底单/箱货清单有问题」。⚠️ 文件夹名里的「欧洲」是运输走廊（欧洲铁路）非目的国，已从国家表剔除避免误报
+- **格式**：提单只产 PDF、保函只产 DOCX、底单只产 PDF；ZIP 压缩包命名 =「大文件夹名 + 系统制作文件」（如 `7月第2周系统制作文件.zip`，取 `webkitRelativePath` 第一段）；ZIP 内按票建**子文件夹**（子文件夹名 = 原上传文件夹名），每票三份文件按「底单.pdf → 提单.pdf → 保函.docx」归档（保函预览 PDF 放 `preview/` 子目录不进 ZIP）
+
+#### API
+
+- `POST /api/bl/extract`（`file=` PDF，可选 `packing=` xlsx、`tracking=` xlsx）→ `{ ok, record, bl_fields, bl_header, telex_fields, warning }`（单票，保留）
+- `POST /api/bl/extract-batch`（`folder_{i}` / `pdf_{i}_{j}` / `packing_{i}` / `weekly_packing` / `tracking`）→ `{ ok, tickets:[{folder, record, warning}], bl_fields, bl_header, telex_fields }`（批量）
+- `POST /api/bl/generate`（`{ tickets:[{folder, record}] }`）→ `{ ok, zip, previews:[{folder, bl, telex}] }`（相对路径，经 `/api/bl/file/<rel>` 访问）
+- `GET /api/bl/file/<path:rel>` → 生成文件（ZIP 下载 / 提单·保函 PDF 预览），仅允许 `workspace/output` 内文件
+
+#### 部署
+
+- 前端经 `next.config.ts` `rewrites()` 把 `/api/bl/:path*` 代理到 Flask（`BL_SERVICE_URL`，默认 `http://localhost:5000`）
+- Flask 用 pm2 常驻（`ecosystem.config.cjs` 的 `etton-bl-review`，原生 Python + 原生 LibreOffice 转 PDF，不依赖 Docker）
+
+---
+
+### 3.15 TR全量入仓数据整理 — `/warehouse-entry-full`
+
+**文件**: `src/app/warehouse-entry-full/page.tsx` + `src/lib/warehouse-entry-full.ts` + `src/app/api/warehouse-entry-full/route.ts`（含 `/export` 子路由）
+
+#### 与「TR入仓数据整理」的区别
+
+原 `/warehouse-entry`（3.13）是**代表箱选数**（每个 FBA 号选一个代表箱 + 历史库对比），本功能是**逐箱输出**：
+- 一个 FBA 号下每个供应商箱各生成一行（`totalBoxes = 1`），不再做代表箱选数
+- **无历史库**：不读条数、不累积、无历史库 UI、无「建议参考历史最大值放大」报警
+- 出给客户尺寸：材积主导（材积重 > 实重）→ 11 级尺寸修正规则放大；实重主导 → 取该箱原值（长宽高降序）
+
+#### 功能
+
+1. 上传客户数据 + 供应商数据，逐箱匹配、自动放大尺寸、校验报警，生成「出给客户」建议箱规
+2. 页面**不展示箱规表格**，整理完成后直接展示汇总 + 全局校验条 + 导出按钮
+3. 导出《内部三类数据_<日期>_合计总箱数<N>.xlsx》（复用 `exportOutputBuffer`，含全局兜底校验）
+
+#### 核心业务规则
+
+- **11 级尺寸修正规则**（材积主导时）：三边降序为 `[最长, 次长, 短]`，依次尝试规则 1–10（三边各+1 / 短边+2 / 次长+短各+1 / 最长+短各+1 / 次长+2 / 最长+次长各+1 / 最长+2 / 短+1 / 次长+1 / 最长+1），命中第一条「不冲突」即返回；冲突 = 修正后三边和 vs 客户三边和 差 ≥ 6，或 修正后材积重 vs 客户材积重 差 ≥ 2；规则 11「原值」兜底（前面全冲突时不放大）
+- **差异校验**（该供应商箱 vs 客户申报）：材积主导 → 三边和差 ≥ 6、材积重差 ≥ 2「核查过机图」；实重主导 → 实重差 ≥ 0.5「核查过机图」
+- **供应商过大箱**：该 FBA 号最大材积重 − 当前箱材积重 ≥ 2 → 「核查过机图」
+- **成本重校验**：Σ出给客户总计费重 < Σ供应商总计费重 → 「成本重过大，请和供应商申请」（导出前全局兜底等比例放大并标 `[全局调整]`）
+
+#### API
+
+- `POST /api/warehouse-entry-full`：上传两文件 → `{ rows, supplierTotal, summary }`（无历史库字段）
+- `POST /api/warehouse-entry-full/export`：body `{ rows, supplierTotal }` → 下载 Excel（无历史库累积）
+
+---
+
 ## 4. 非目标（明确没做的）
 
 - ❌ **用户认证/登录**: LAN 工具，无权限控制
@@ -603,6 +676,9 @@ interface PacificSplitResult {
 - ❌ **i18n 国际化**: 仅中文
 - ❌ **PWA / 离线支持**: 无 Service Worker
 - ❌ **自动化测试**: 无单元测试 / E2E 测试
+- ✅ **OCR 扫描件识别**（2026-09 已实现）：扫描底单（无文字层）用 RapidOCR（rapidocr_onnxruntime，中文识别准、比 tesseract 稳）识别，复用标签定位提取（提单号/船名航次/起运地/目的港/运抵国/箱数/品名/总重量/起运日期均可提取）
+- ❌ **英文自动翻译**: 提单/保函的英文字段（shipper 英文名+地址、consignee 英文、起运地/目的港英文、品名翻译、总体积、实际起运日期）底单里没有，靠人工在审核表补填，不做自动翻译/港口映射
+  - ⚠️ 已部分放开：拓锐客户 shipper/consignee 英文为**固定常量硬编码**；品名英文翻译 + 总体积改由**箱货清单 xlsx** 自动汇总（`parse_packing_list`）。仍留人工的只有：起运地/目的港**英文**（底单是中文「阿拉山口铁路/英国」，提单要英文 `CHONGQING`/`MALASZEWICZE`）+ 实际起运日期（提单要实际开船/发车日，底单只有申报日期）。船名航次本身**在底单有**（「运输工具名称及航次号」列，海运为船名航次、非海运该列为 `@` 占位符→空）
 
 ---
 
@@ -865,6 +941,201 @@ interface PacificSplitResult {
     - 根因（两层）：① 页面「供X/客Y」是**三边和**（cm），而报警比较的是**计费重**（kg）——供应商箱规 49×43×43（三边和 135、计费重 15.10），客户申报 42.2×42.4×47.4（三边和 132、实重 15.21、计费重 15.21），供应商箱子尺寸更大但实重更轻 → 计费重反而更小，报警是**正确**的，只是文案没写清「计费重」维度；② 报警判断原本取 `supplierPickedChargeable`（选数命中箱规 `picked`），而展示的「供应商计费重」列取 `supplierChargeable`（第 1 大箱 `sorted[0]`），`selectBox` 在「新品」或「第 1 大 > 历史最大」时退选第 2 大，两者不一致会误报
     - 修复：① 判断改用 `supplierChargeable`（第 1 大真实最大计费重），与展示一致；② 文案改为「供应商计费重小于客户，请确认」，明确是计费重维度，避免与三边和混淆
     - 位置：`warehouse-entry.ts` `buildSuggestions()` 报警分支（`supplierChargeable < c.chargeableWeight`）
+
+44. **提单模板字段值在文本框 `w:txbxContent` 里，python-docx 读不到** (2026-09-04)
+    - 症状：生成后的提单 docx 用 `Document().paragraphs` + `tables` 遍历，`含提单号/柜号` 等全部 False，但残留占位符却是 0 个——看似「合并没填值」，实则字段值落在文本框里
+    - 根因：提单模板是带文本框/形状的复杂 Word，MERGEFIELD 的 field-result 文本嵌在 `<w:txbxContent>` 内，python-docx 的 `paragraph.text`/`cell.text` 不遍历文本框
+    - 校验方法：直接解压 docx 读 `word/document.xml`，`re.sub(r"<[^>]+>","",xml)` 后判断字段值是否在纯文本里（实测 12 个字段全在）
+    - 位置：`bl-service/core.py` `fill_bl_docx()`（生成本身正确，坑在验证方式）
+
+45. **报关底单是横向 842×595，且 3/9 是扫描件无文字层** (2026-09-04)
+    - 参考实现假设纵向坐标（y≈101/125/170/194），对真实横向报关单完全错位，已重写为「标签定位」（`_value_row(label)` 找标签行下方值行），并对 6 张文字层底单逐字段校准
+    - 3/9 底单 `extract_words` 返回 0 字（纯扫描图片）→ 走 RapidOCR 识别（竖版先 `np.rot90` 转正），再复用标签定位提取；OCR 失败才回退 `_empty_record()`（见「扫描件 OCR 兜底」）
+    - 柜号前缀不固定（CIMU/WNGU/TIIU/TLLU），正则用 `[A-Z]{4}\d{7}` 而非参考的硬编码 `MATU\d{7}`
+    - 位置：`bl-service/core.py` `extract_customs_data()`
+
+46. **docx-mailmerge 版本上限 0.5.0** (2026-09-04)
+    - `requirements.txt` 若写 `docx-mailmerge>=0.6` 会安装失败（PyPI 最新仅 0.5.0），已改为 `docx-mailmerge>=0.5.0`
+    - 位置：`bl-service/requirements.txt`
+
+47. **docx→PDF 用原生 LibreOffice 转，不依赖 Docker** (2026-09-04)
+    - `docx_to_pdf()` 经 `_find_soffice()` 定位可执行文件：优先 Windows 原生安装（`C:\Program Files\LibreOffice\program\soffice.exe` 及 x86 路径），再回退 `shutil.which("soffice"/"libreoffice")`（Docker/Linux）
+    - 转换加独立 user profile（`-env:UserInstallation=...`）避免与用户手动打开的 LibreOffice GUI 实例「已运行/锁 profile」冲突；找不到 LibreOffice 时 `try/except` **静默跳过 PDF、只产 docx**，不阻断生成流程
+    - 本机已装 LibreOffice 26.8.0（winget），Flask 原生跑（`python review_app.py`）即可产 PDF，无需 Docker
+    - 位置：`bl-service/core.py` `_find_soffice()` + `docx_to_pdf()`
+
+48. **箱货清单表头字会漏进品名；且「品名」数量可能与参考提单不一致** (2026-09-04)
+    - `parse_packing_list` 首版把表头行「英文品名」四字当成了第一个品名（因为表头行该列值恰好等于「英文品名」）；已通过记录 `header_idx` 并 `i <= header_idx` 跳过表头行修复
+    - 参考提单 BG20260605002 品名列 **4 个**（CILP/FOLDABLE/INS RIPPLE/MAGIC BALL），但对应箱货清单 `箱货清单-TRKJ26060003.xlsx` 实为 **5 个**（还含 `ROSE PROJECTOR LIGHT` 玫瑰投影灯，10 箱/131kg/0.827CBM）——且 54 箱、783.48kg、4.307CBM 三数都把这 10 箱算进去了，说明参考提单漏写了玫瑰投影灯（人为遗漏）。本功能按箱货清单**全量汇总 5 个**；用户已确认参考提单确属漏写，保留 5 个
+    - 位置：`bl-service/core.py` `parse_packing_list()`
+
+49. **本机 Docker Desktop 跑不起来（BIOS 虚拟化未开），故改用原生 LibreOffice** (2026-09-04)
+    - 症状：Docker Desktop 首启报 `Virtualization support not detected`，`docker info` 返回 500，`wsl -l -v` 无 docker-desktop 发行版
+    - 根因：Windows 11 Home + BIOS 里 AMD SVM（虚拟化）未开启，Docker Desktop 依赖 WSL2/Hyper-V 无法启动；开启需重启进 BIOS 改设置，风险高
+    - 决策：本功能唯一依赖 Docker 的理由是 LibreOffice（docx→PDF），而 LibreOffice 可直接装 Windows 原生 → **放弃 Docker，改用原生 LibreOffice**（见 #47），Flask 用 `python review_app.py` 原生跑即可
+    - 备注：本机已装但未启用的 Docker Desktop 保留未动，若日后要跑其他容器再处理 BIOS 虚拟化
+
+50. **提单号应从「提运单号」标签取值，而非从收货人值行右侧猜** (2026-09-05)
+    - 原逻辑 `bl_words = [w for w in crow if w["x0"] >= 500]` 把提单号绑定在「境外收货人」值行右侧（x≥500）：铁路底单里「提运单号」的值恰好与收货人同值行，碰巧取对
+    - 海运底单（如 `BG20260508013`）布局不同：「提运单号」标签在 y=127，值 `G2605115309` 在 y=140 单独一行，与收货人值行（y=141）分开 → 原逻辑提单号取空
+    - 已改 `_value_by_label(lines, "提运单号")`：定位「提运单号」标签的 x0，取下方同 x 列（x0±12）第一个非占位值，海运/铁路通用
+    - 位置：`bl-service/core.py` `_value_by_label()` + `extract_customs_data()` 第 3 步
+
+51. **箱货清单可能无「体积」列，需回退长×宽×高×箱数算体积** (2026-09-05)
+    - 铁路单箱货清单（TRKJ26060003）有「体积」列 → 直接求和（4.307）
+    - 海运单箱货清单（TRKJ26050005）**无「体积」列**，但有「长(CM)/宽(CM)/高(CM)/总箱数(CTN)」→ 原逻辑总体积取 0，提单体积字段错
+    - 已改 `parse_packing_list`：有「体积」列则直接求和；无则回退 `长*宽*高*总箱数/1e6`（cm³→m³）。实测海运单 3.8859 CBM（45 箱），总重量 695.11 与底单一致
+    - 位置：`bl-service/core.py` `parse_packing_list()`
+
+52. **物流追踪表匹配 ETD 开船日（多 sheet 表头不一）** (2026-09-05)
+    - 物流追踪表 5 个 sheet（2023/2024/2025/最新物流动态/10月），表头位置不一：「Shipment ID（FBA号）」在 A 列（新版）或 AA 列（2023/10月），ETD 在 D 列，2023/10月表头在第 1 行（第 0 行是标题）
+    - 匹配键 = 货箱清单「FBA ID」↔ 物流追踪表「Shipment ID」，实测海运单 16/16 全命中；ETD 开船日覆盖提单「起运日期」
+    - ETD 日期多是 Excel 序列号（如 45668）或 datetime，`_excel_date_str` 统一转 `YYYY-MM-DD`
+    - 「船名航次」维持底单提取、**不用**物流追踪表（用户决策）
+    - 位置：`bl-service/core.py` `parse_tracking_list()` + `_excel_date_str()` + `review_app.py` extract
+
+53. **提单 FREIGHT 文本框 96pt 太窄，「FREIGHT PREPAID」换行被裁成只剩 FREIGHT** (2026-09-05)
+    - 症状：模板改成「FREIGHT PREPAID」后，LibreOffice 渲染的 PDF 仍只显示「FREIGHT」（`PREPAID` 换到第二行，被 25pt 高的文本框裁掉）
+    - 根因：运费文本框 96.35×25pt 太窄，带空格「FREIGHT PREPAID」16 字符在空格处换行。**正确提单就是带空格**「FREIGHT PREPAID」（早期误判为连写，已回退）
+    - 修复：模板保持「FREIGHT PREPAID」带空格 + 文本框加宽 96.35→115pt（DrawingML `wp:extent`/`a:ext` cx 与 VML `width` 双分支同步改，LibreOffice 渲染 VML fallback 分支）
+    - 位置：`提单模板.docx`（脚本改，备份 `.bak_freight2`）
+
+54. **品名长行换行成多行、且早期误判「连写去空格」** (2026-09-05)
+    - 症状：海运单品名「INS STYLE NORTHERN LIGHTS NIGHT LIGHT」在 109pt 宽文本框里换行成 4 行、溢出文本框
+    - 根因：品名文本框 109×127.4pt 太窄（最长品名 34 字符需约 220pt）。**正确提单品名是带空格**（`CILP TABLE LAMP`），早期「连写去空格」是误解已回退
+    - 修复：①`fill_bl_docx` 填品名时**保留空格**（去掉早期 `.replace(" ", "")`）；②品名文本框加宽 109→240pt（`wp:extent`/`a:ext` cx 1384300→3048000 + VML `width:109pt→240pt`）。实测 4 个品名全部单行、不重叠
+    - 位置：`bl-service/core.py` `fill_bl_docx()` + `提单模板.docx`（备份 `.bak_product`）
+
+55. **港口英文 = 中文港口名查表 + 箱货清单「客户渠道」查表，双映射自动记忆** (2026-09-05)
+    - 港口英文不能只靠中文名硬译：同一目的国不同渠道对应不同港口（「易·22日达卡派包税」→ `LONG BEACH,CA`、「易·15日达卡派包税」→ `LOS ANGELES,CA`）
+    - 实现：①`port_map.json`（中文港口→英文，如「盐田」→`YANTIAN`），`apply_port_map` 查表、`remember_ports` 人工修正后回写；②`channel_map.json`（客户渠道→目的港英文），`parse_packing_list` 定位「客户渠道」列，`apply_channel_map` 按渠道覆盖目的港（比中文港口名更精确）、`remember_channels` 带渠道的票人工改港后回写
+    - 顺序：extract 里 `apply_port_map` 先跑、`apply_channel_map` 后跑（渠道命中则覆盖目的港）；generate 里 `remember_ports` + `remember_channels` 都做记忆回写
+    - 位置：`bl-service/core.py`（`apply_channel_map`/`remember_channels`/`parse_packing_list` 加「客户渠道」列）+ `bl-service/review_app.py` + `bl-service/channel_map.json`
+
+56. **提单文本框段落被 LibreOffice 默认渲染成左右对齐（justify），英文中间大空格** (2026-09-05)
+    - 症状：shipper「GUANGZHOU TUORUI TECHNOLOGY CO., LTD」与品名第二/第三个，单词间距被拉成 justify（~14.6pt），看起来中间空太多
+    - 根因：模板文本框段落 `w:txbxContent` 里的 `<w:p>` 未显式声明对齐，Word 默认 left，但 LibreOffice 渲染文本框段落时默认 justify
+    - 修复：给 shipper / consignee / 品名文本框段落补 `<w:pPr><w:jc w:val="left"/></w:pPr>`，显式左对齐（间距回落到 ~2.1pt 正常值）
+    - 位置：`提单模板.docx`（脚本改，备份 `.bak_align`）
+
+57. **提单日期格式应为 `DD MMM YYYY`（带空格），且 SHIPPED ON BOARD / FREIGHT PREPAID 中间要空格** (2026-09-05)
+    - 症状：早期把日期转成 `14MAY2026`、SHIPPED ON BOARD 连成 `SHIPPEDONBOARD`、FREIGHT PREPAID 连成 `FREIGHTPREPAID`，与正确提单不符
+    - 根因：早期用 pdfplumber `x_tolerance=3` 提取正确提单时把空格合并，误判为「连写」；改用 `x_tolerance=1` 后确认正确提单全部**带空格**（`14 MAY 2026`、`SHIPPED ON BOARD:14 MAY 2026`、`FREIGHT PREPAID`）
+    - 修复：①`_date_to_bl` 输出 `DD MMM YYYY`（`2026-05-14` → `14 MAY 2026`，月英文 + 两侧空格）；②模板「SHIPPEDONBOARD:」→「SHIPPED ON BOARD:」、「FREIGHTPREPAID」→「FREIGHT PREPAID」恢复空格
+    - 位置：`bl-service/core.py` `_date_to_bl()` + `提单模板.docx`
+
+58. **目的港左列「Port of Discharge」文本框被 LibreOffice 误渲染到右列** (2026-09-05)
+    - 症状：左列 Port of Discharge（`Text Box 10`，DrawingML `positionH relativeFrom="margin" align="left"` + VML `mso-position-horizontal:left;relative:margin`）渲染到 x0≈172（右列），与右列 Place of Delivery（x0≈180）重叠，PDF 里两段「LONG BEACH,CA」叠成乱码
+    - 根因：LibreOffice 对该文本框的 `margin:align left` 水平定位解析失效（同结构的「船名航次」`Text Box 7` 却正常渲染在 x0≈43，未定位到差异根因）
+    - 修复：把 `Text Box 10` 的水平定位从「对齐 margin left」改成显式偏移——DrawingML `positionH relativeFrom="margin" align="left"` → `relativeFrom="column" posOffset="0"`、VML `mso-position-horizontal:left;relative:margin` → `margin-left:0pt`。修复后 Port of Discharge=x0≈43（左）、Place of Delivery=x0≈180（右），与正确提单一致
+    - 位置：`提单模板.docx`（脚本改，备份 `.bak_port`）
+
+59. **渠道名与实际运输方式不符 → 目的港歧义（公路 vs 铁路）** (2026-09-05)
+    - 症状：同一渠道「英国快铁自税递延-卡派」，铁路单（6月第4周 BG20260626029，运输方式(3)=铁路）目的港=MALASZEWICZE；公路单（6月第3周 BG20260619015，运输方式(4)=公路，被升级公路运输）目的港=The U.K.。channel_map 按渠道固定映射「英国快铁自税递延-卡派」→MALASZEWICZE，对公路单会错
+    - 根因：渠道名「快铁」是历史命名，个别票实际改走公路；底单「运输方式(N)」字段才准确，但当前不做运输方式感知
+    - 处理：不自动区分运输方式（用户决策：升级公路的特殊票是少数个例），channel_map 保留渠道映射（对铁路单正确），公路单由人工在审核表改目的港
+    - 位置：`bl-service/channel_map.json`（「英国快铁自税递延-卡派」→MALASZEWICZE）
+
+60. **源文件夹命名「铁路/快铁」混用** (2026-09-05)
+    - 症状：6月第3周 票2 源文件夹名「英国铁路不包税-卡派」，但底单/标准答案文件名是「英国快铁不包税-卡派」；命名严格照抄文件夹名 → 生成文件名跟着叫「铁路」
+    - 处理：命名严格照抄源文件夹名（用户决策「不归一」，不猜），由用户保证源命名与标准一致（统一用「快铁」）
+
+61. **品名去版本号（保留全大写）** (2026-09-07)
+    - 症状：原逻辑把箱货清单「英文品名」列 `.upper()` 转全大写，但保留末尾版本号，如 `Blue Ocean Dream Galaxy Projector 3.0` → `BLUE OCEAN DREAM GALAXY PROJECTOR 3.0`（多了 `3.0`）
+    - 处理：新增 `_strip_version`（正则去掉末尾版本号 `x.y`，含连写如 `Projector2.0`），品名仍全大写 → `BLUE OCEAN DREAM GALAXY PROJECTOR`；体积维持长×宽×高×总箱数逐行合计（用户确认算法正确）
+    - 位置：`bl-service/core.py`（`_strip_version` + `parse_packing_list`/`parse_packing_list_weekly`/`_translate_products`）
+
+62. **系统SO 展示（第一列 + 只读 + 多值分行）** (2026-09-07)
+    - 症状：一票报关底单可能对应多个工作号（每个工作号一个系统SO），后端 `_merge_workgroups` 已把多个 SO 去重收集，用换行 `"\n".join` 写入 `rec["系统SO"]`；审核表原用单行 `<input>` 渲染，换行不显示、且字段位置靠后、可编辑易误改
+    - 处理：系统SO 移到审核表第一列（紧跟「票/文件夹」后），只读展示（不允许编辑），用 `<div whitespace-pre-wrap>` 分行显示多个 SO，方便按 SO 查找
+    - 位置：`bl-service/core.py`（`BL_FIELDS` 首位放 `"系统SO"`）、`src/app/bl-review/page.tsx`（单元格渲染 `c === "系统SO"` 走只读 div）
+
+63. **运输工具 = 船名航次，手工填写即可** (2026-09-07)
+    - 症状：非海运单（铁路/卡航）底单「运输工具」列为 `@` 占位符、提取不到船名航次 → 原警告「请找供应商核实班列号/车次」误导（运输工具本应等于船名航次，不是班列号/车次）
+    - 处理：`core.py` 已让 `运输工具 = 船名航次`；为空时警告改为「运输工具为空，请手工填写（等于船名航次）」，用户在审核表手工填一个即可
+    - 位置：`bl-service/review_app.py`（extract / extract-batch 两处警告文案）
+
+64. **船名航次过长时自动缩字适应、不换行** (2026-09-07)
+    - 症状：船名航次文本框约 108pt 宽，`CMA CGM MANTA RAY/0GVMWE`（24 字符）在默认 10.5pt 下换行，与正确提单「`CMACGMMANTARAY/0GVMWE` 8.45pt 单行」不符
+    - 处理：`core.py` 新增 `_fit_field_font(text, box_pt=108, default_pt=10.5, min_pt=7.0)`——按字符估算宽度（大写≈0.78em、数字≈0.55em、空格≈0.25em），超出可用宽则 0.5pt 步进缩小（下限 7pt）；`_apply_run_font_size()` 在 `doc.merge()` 后按「船名航次」文本定位对应 `<w:t>` 的 run 并写 `w:sz`/`w:szCs`（半点单位）。短文本保持模板默认字号不变
+    - 位置：`bl-service/core.py`（`_fit_field_font` / `_apply_run_font_size` / `fill_bl_docx`）
+
+65. **电放保函复刻标准答案格式（含页眉 + 黑线）** (2026-09-07)
+    - 症状：`fill_telex_docx` 程序重建的保函缺「广州拓锐科技有限公司」页眉、无黑色分隔线，字体/行距/间距/标点都与标准答案 docx 不符
+    - 处理：解析标准答案 docx 的 35 个段落与页眉 shape，按段落级精确复刻——页眉「广州拓锐科技有限公司」等线 15.5pt bold + 底边框黑线（0.75pt、宽 415.35pt、右缩进 42.35pt 对齐 shape 宽度）；标题 17/15pt、正文 14pt、声明 12pt bold（对齐 Heading3 默认）；中文=宋体/等线、英文数字=Times New Roman（`add_mixed` 按中英文拆分 run）；页面边距 top2.61/bottom0/left3.15/right2.29cm、header_distance 1.63cm、行距/段前/左右缩进/全半角标点（字段用半角 `: `、TO/FROM/申请单位用全角 `：`）逐段对齐
+    - 位置：`bl-service/core.py`（`fill_telex_docx`）
+
+66. **客户配置化（提单/保函按客户分发）** (2026-09-07)
+    - 背景：提单/保函最初写死为拓锐一家（shipper/consignee 常量 + 保函页眉「广州拓锐科技有限公司」硬编码）；用户要求入口加「客户」选项，拓锐为第一个，其他客户提单需求略有偏差后续补上
+    - 处理：`core.py` 新增 `CUSTOMERS` 字典（key=客户，value=shipper_bl/consignee_bl/shipper_telex/consignee_telex/telex_header/telex_to/telex_from）+ `get_customer_config()`（未知客户回退默认拓锐）；`extract_customs_data`/`_empty_record`/`fill_telex_docx`/`generate_batch` 均加 `customer` 参数；`review_app.py` 三个接口从 form/payload 读 `customer`；前端 `/bl-review` 上传区顶部加「客户」下拉（默认拓锐），extract/generate 透传 `customer`
+    - 注意：新增客户 = 后端 `CUSTOMERS` 加一条即可（前端下拉经 `GET /api/bl/customers` 动态拉取 `list_customers()`，无需改前端）；保函版式（35 段）暂统一拓锐版式，其他客户版式不同时需在 `fill_telex_docx` 按 customer 分发
+    - 位置：`bl-service/core.py`（`CUSTOMERS`/`get_customer_config`/`list_customers`）、`bl-service/review_app.py`（`GET /api/bl/customers`）、`src/app/bl-review/page.tsx`
+
+67. **电放保函生成 2 页 → 1 页（docDefaults 段后距/行距溢出）** (2026-09-07)
+    - 症状：`fill_telex_docx` 生成的保函本该 1 页，实测溢出成 2 页（第 2 页只有页眉 + 盖章/日期两行）
+    - 根因：python-docx 默认模板的 `docDefaults` 带 `<w:spacing w:after="200" w:line="276" w:lineRule="auto"/>`（每段段后距 10pt、行距 1.15），标准答案 docx 无 docDefaults 间距（段后 0、单倍行距 1.0）；35 段每段都继承 10pt 段后距 + 1.15 行距，累积溢出约 60pt
+    - 处理：`fill_telex_docx` 的 `para()` 助手与页眉段落显式写 `space_after = Pt(0)` + `line_spacing = 1.0` 作为默认（显式传入的 `line`/`before` 仍覆盖），覆盖模板 docDefaults；校验 `len(pdf.pages) == 1`
+    - 位置：`bl-service/core.py`（`fill_telex_docx` 的 `para()` 与页眉段落）
+
+68. **运输工具取值修正：优先「运输工具名称及航次号」栏位而非备注** (2026-09-07)
+    - 症状：欧洲卡航底单（扫描件 TRKJ26070007）「运输工具」被提取成备注里的船名 `C258T0797/71ADV02N/M`，而正确值是「运输工具名称及航次号」栏下的车架号 `/91440112M0J494`
+    - 处理：`core.py` 新增 `_value_below_label()`（标签紧邻下方 dy 4–20 内、同 x 列的非占位值），「船名航次」优先取该栏值并 `lstrip("/")`，取不到才回退备注「运输工具名称：XXX」；dy 上限防止栏值为空/@ 时误抓下方「征免性质」标签（x0 相同但更远）
+    - 位置：`bl-service/core.py`（`_value_below_label` / `extract_customs_data` 第 4 步）
+
+69. **审核表「票/文件夹」换行完整显示 + 「系统SO」列横向滚动锁定** (2026-09-07)
+    - 症状：票/文件夹名过长被 `truncate` 截断成省略号；横向滚动查看后面字段时「系统SO」列跟着滚走、无法对照哪一票
+    - 处理：`src/app/bl-review/page.tsx` 审核表——「票/文件夹」列只显示「BG」开始后的部分（`shortFolder`，全名放 title），固定 `w-[180px]`（约 12 字）+ `break-all` 换行；「系统SO」列 `sticky left-[180px]`（配合票/文件夹列 180px 宽）一起锁定，横向滚动不动；`table` 加 `min-w-max` 防止各列被压缩成「一行 6 字」
+    - 位置：`src/app/bl-review/page.tsx`（审核表 thead/tbody）
+
+70. **「文件命名」列移除 + ZIP 命名 = 大文件夹名 + 系统制作文件** (2026-09-07)
+    - 背景：审核表「文件命名」列原本显示提单号（误导，实际命名基于文件夹）；用户要求移除该列，并规定 ZIP 压缩包命名为「大文件夹名 + 系统制作文件」
+    - 处理：前端 `columns` 过滤掉「文件命名」；上传时取 `webkitRelativePath` 第一段作为「大文件夹名」（rootFolder），generate 时随 `root_folder` 传后端；`generate_batch` 新增 `root_folder` 参数，ZIP 名 = `{大文件夹名}系统制作文件.zip`（空则退回 `ETTON提单_电放保函_时间戳.zip`）。保函文件名关键词「电放保函」→「保函」
+    - 位置：`src/app/bl-review/page.tsx`（columns 过滤 / rootFolder / handleGenerate）、`bl-service/review_app.py`（api_generate 读 root_folder）、`bl-service/core.py`（`generate_batch` root_folder / `derive_output_name` 调用）
+
+71. **周汇总箱货清单匹配容差 0.5→1.0kg** (2026-09-08)
+    - 症状：7月第4周 BG20260724005 合并报关（TRKJ26070017+18+20，119箱）底单毛重 1949.89kg，箱货清单三工作号合计 1950.44kg，差 0.55kg 超过原容差 0.5kg → `match_weekly_packing` 匹配失败，系统SO 号码为空
+    - 处理：`match_weekly_packing` / `_subset_sum` 的毛重容差从 `< 0.5` 放宽到 `< 1.0`（报关单毛重与箱货清单求和存在 ±0.5~1kg 舍入差异）
+    - 位置：`bl-service/core.py`（`match_weekly_packing` / `_subset_sum`）
+
+72. **提单批量上传大文件夹报 500「Request body exceeded 10MB」→ 后端 ClientDisconnected** (2026-09-08)
+    - 症状：上传整个「拓锐7月份底单」目录（35 个 PDF，约 27MB）时，前端报「请求失败：Unexpected token 'I', "Internal S..." is not valid JSON」；Next.js 日志 `Request body exceeded 10MB for /api/bl/extract-batch. Only the first 10MB will be available...` + `Failed to proxy ... socket hang up { code: 'ECONNRESET' }`；Flask 端 `werkzeug.exceptions.ClientDisconnected: 400 Bad Request`
+    - 根因：Next.js rewrite 代理默认对请求体做 clone（供 middleware/route 复用），上限 `DEFAULT_BODY_CLONE_SIZE_LIMIT = 10MB`（`body-streams.js`）。超过 10MB 时 Next.js 截断请求体（只传前 10MB）再转发到 Flask，Content-Length 与实际字节不符 → Flask 解析 multipart 读到一半流就结束 → 抛 `ClientDisconnected`；Next.js 侧报 `socket hang up`/`ECONNRESET` 回 HTML 500。单周目录（约 7MB）不超限所以之前能成功，整月目录（约 27MB）才触发
+    - 处理：①`next.config.ts` 加 `experimental.middlewareClientMaxBodySize: "100mb"`（放宽 clone 上限，根治截断）；②前端 `readJson()` 兜底——`res.text()` 后 `JSON.parse`，失败按 HTTP 状态抛友好中文错误；③后端 `@app.errorhandler(Exception)` 兜底——未捕获异常返回 JSON（而非 HTML 500），traceback 打到 pm2 error log
+    - 位置：`next.config.ts`（`middlewareClientMaxBodySize`）、`src/app/bl-review/page.tsx`（`readJson`）、`bl-service/review_app.py`（`handle_unexpected`）
+
+73. **TR全量入仓（warehouse-entry-full）是 TR入仓（warehouse-entry）的逐箱分支，两套 lib 独立维护** (2026-09-08)
+    - 背景：逐箱输出 + 11 级尺寸修正的新逻辑作为独立新功能「TR全量入仓数据整理」发布，原「TR入仓数据整理」（代表箱选数 + 历史库）保留不动
+    - 实现：`warehouse-entry-full.ts` 从 `warehouse-entry.ts` 复制后剥离历史库（`HistoryEntry`/`loadHistory`/`accumulateHistory`/`importHistoryFromExcel`/`exportHistoryBuffer` 等全部删除，`fs`/`path` import 一并移除），`buildSuggestions(customers, boxes)` 无 history 参数，逐箱输出 + `applyDimensionRules`（11 级）+ `forceAmplify`（仅全局兜底用）
+    - 坑：两套 lib 共享同一套 客户/供应商格式检测（`CUSTOMER_*_PATTERNS`/`SUPPLIER_*_PATTERNS`）与 `exportOutputBuffer` 列位逻辑，后续新增格式或改导出列需**两边同步**，否则新功能会漏掉新格式
+    - 位置：`src/lib/warehouse-entry-full.ts` + `src/app/warehouse-entry-full/` + `src/app/api/warehouse-entry-full/`
+
+74. **提单批量生成（generate）超 30 秒被 Next.js 代理提前断开 → socket hang up / ECONNRESET** (2026-09-08)
+    - 症状：前端点「确认生成」批量生成（如 29 票）时，报「请求失败：服务返回异常（HTTP 500）」（前端 `readJson` 的兜底文案）；Next.js 日志 `Failed to proxy http://localhost:5000/api/bl/generate [Error: socket hang up] { code: 'ECONNRESET' }`，而 Flask 端无新 traceback（generate 后端仍在跑或已完成）——即**后端没崩，是代理层主动断的**
+    - 根因：Next.js rewrite 代理对转发请求默认 **30 秒超时**（`proxy-request.js`: `proxyTimeout: proxyTimeout === null ? undefined : proxyTimeout || 30000`，单位毫秒）。`generate` 每票 2 次 LibreOffice 转换（提单 PDF + 保函预览 PDF），实测单次转换约 3.6s，29 票 ≈ 58 次转换 ≈ 209s（约 3.5 分钟），远超 30s → 代理 30s 后主动断开上游连接 → Next.js 侧 `socket hang up`/`ECONNRESET` 回 HTTP 500。与 #72（extract 请求体超 10MB 被截断）是**同一次「整周多票」故障的两个不同根因**：#72 是「请求体太大被截断」，本坑是「响应太慢被超时断开」，都发生在 Next.js rewrite 代理层
+    - 处理：①`next.config.ts` 加 `experimental.proxyTimeout: 600000`（10 分钟，毫秒），让批量生成有充足时间；②顺手修 `core.py` 的 `docx_to_pdf`——原来只捕获 `(FileNotFoundError, OSError)`，未捕获 `subprocess.TimeoutExpired`（单次 LibreOffice 超 120s 会抛未捕获异常 → 整批 500），补上后单票转换超时降级为「仅产 docx」不阻断整批
+    - 验证：经 `localhost:3001` 代理发 6 票 generate（12 次转换，实测 32.18s > 30s），返回 HTTP 200 `ok=true`、6 条 previews，确认超过原 30s 线不再断开
+    - 位置：`next.config.ts`（`proxyTimeout`）、`bl-service/core.py`（`docx_to_pdf`）
+
+75. **拆分报关资料靠文件名「报/放/委托」排序不可靠 → 改读首页表头识别类型排序合并** (2026-09-08)
+    - 症状：`BG20260716005 2票 英国快铁不包税-卡派 7箱 是7` 文件夹「扫描不到内容」；文件夹内 3 个 PDF 命名不规范——`广州拓锐科技有限公司.pdf`（实为委托报关协议）、`广州拓锐科技有限公司7件 .pdf`（报关单）、`广州拓锐科技有限公司7件.pdf`（放行单），文件名都不含「报/放/委托」关键词
+    - 根因：旧 `_declaration_sort_key` 靠文件名「报/放/委托」排序，这三个文件全归「其他=3」，按字典序 `广州拓锐科技有限公司.pdf`（`.` 排 `7` 前）落最前 → 合并后第一页是「委托报关协议」；`extract_customs_data` 只读第一页（`pdf.pages[0]`）→ 报关单标签全对不上 → 字段全空
+    - 处理（按用户「三类要合并成一个 PDF，先报关单→放行单→委托协议，不管命名如何、读表头判断」的要求）：
+      ① `merge_declaration_pdfs` 改读首页表头识别类型 `_declaration_kind`：报关单=0（「出口/进口货物报关单」标题）→ 放行单=1（「放行通知书」标题）→ 委托协议=2（「委托报关协议」标题）→ 其他=3；按此排序后**三类都合并不丢弃**（委托协议也是报关资料一部分）
+      ② `extract_customs_data` 改遍历各页，选第一页含报关单关键标签的页兜底（即便排序后第一页非报关单也能提取）
+    - 注意：判断关键词要用「出口货物报关单/放行通知书」这类**标题词**，不能用「通关无纸化」——报关单备注栏也常写「通关无纸化」，会把报关单误判成放行单（实测 `39件 报.pdf` 备注含「通关无纸化」）
+    - 位置：`bl-service/core.py`（`_declaration_kind` / `merge_declaration_pdfs` / `extract_customs_data`）
+
+76. **运输工具（船名航次）值含空格被拆成多个 word → 只提取到第一个词** (2026-09-08)
+    - 症状：`BG20260724008 美转加美森--加东` 底单运输工具应为「HAWK I/15E」，但提取表格只写了「HAWK」；同理含斜杠的「UN9951147/2611E」之前也只取到「UN9951147」
+    - 根因：`_value_below_label` 按「标签 x0 ± x_tol」匹配下方值行的**单个 word** 就返回；英文值含空格时 pdfplumber 拆成多个 word（HAWK x0=387、I/15E x0=409.5），第二个 word 距标签 x0 超 12pt → 只返回「HAWK」
+    - 处理：`_value_below_label` 改为从标签列开始**收集同值行 x 连续（gap ≤ 15pt）的多个 word 拼接**，遇到大 gap（下一字段列，如「提运单号」与运输工具列 x0 差 87pt）即停
+    - 位置：`bl-service/core.py`（`extract_customs_data` 内 `_value_below_label`）
+
+77. **`_declaration_kind` 读不到扫描件首页文本 → 拆分扫描件被排到末尾** (2026-09-08)
+    - 症状：扫描件报关资料（无文字层）拆成多份 PDF 上传时，`_declaration_kind` 读 `pdf.pages[0].extract_text()` 得到空串 → 全部归类 kind=3（其他），合并排序退化为按文件名，报关单可能排到放行单/委托协议之后
+    - 根因：`_declaration_kind` 只读文本层，扫描件首页无文本层（如 `TRKJ26070007` / `TRKJ26070060` 广州拓锐底单，4 页纯图片）
+    - 处理：首页文本为空时用 `_ocr_page_to_words(page)` OCR 首页再判断类型（复用 RapidOCR，模型有全局缓存不重复加载）；有文字层的正常 PDF 不受影响、不额外耗时
+    - 位置：`bl-service/core.py`（`_declaration_kind`）
 
 ### 待重构项
 

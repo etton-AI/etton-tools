@@ -1,0 +1,10 @@
+workspace/
+__pycache__/
+*.pyc
+*.pdf
+.git/
+# 模板历史备份（仅提单模板.docx 需要进镜像）
+*.bak_*
+# 本地临时调试脚本
+_*.py
+test_*.py

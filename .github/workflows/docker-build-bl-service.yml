@@ -1,8 +1,11 @@
-name: Build and Push Docker Image
+name: Build and Push BL Service Image
 
 on:
   push:
     branches: [main]
+    paths:
+      - 'bl-service/**'
+      - '.github/workflows/docker-build-bl-service.yml'
   workflow_dispatch:
 
 env:
@@ -22,9 +25,7 @@ jobs:
       - name: Generate image tags
         id: meta
         run: |
-          REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-          echo "image=${{ env.REGISTRY }}/${REPO_LOWER}" >> $GITHUB_OUTPUT
           echo "tag=${SHORT_SHA}" >> $GITHUB_OUTPUT
 
       - name: Log in to GHCR
@@ -37,11 +38,8 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
-          context: .
+          context: bl-service
           push: true
-          # 线上 rewrite 指向后端 bl-service（Sealos 同 namespace 内 DNS，见 k8s/bl-service-deploy.yaml）
-          build-args: |
-            BL_SERVICE_URL=http://bl-service.ns-22nz9gjz.svc.cluster.local:5000
           tags: |
-            ${{ steps.meta.outputs.image }}:latest
-            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+            ${{ env.REGISTRY }}/etton-ai/etton-bl-service:latest
+            ${{ env.REGISTRY }}/etton-ai/etton-bl-service:${{ steps.meta.outputs.tag }}
