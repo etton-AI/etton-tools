@@ -53,6 +53,57 @@ def api_customers():
     })
 
 
+# ---------- ⓪b 港口/渠道映射读写（前端 /bl-mapping 编辑入口） ----------
+def _norm_mapping(d):
+    """校验映射表：必须是 {字符串: 字符串}，key 去空白。返回 (是否合法, 归一化 dict)。"""
+    if not isinstance(d, dict):
+        return False, {}
+    out = {}
+    for k, v in d.items():
+        if not isinstance(k, str) or not isinstance(v, str):
+            continue
+        k = k.strip()
+        v = v.strip()
+        if k:
+            out[k] = v
+    return True, out
+
+
+@app.route("/api/bl/mappings", methods=["GET"])
+def api_get_mappings():
+    return jsonify({
+        "ok": True,
+        "port_map": core.load_port_map(),
+        "channel_map": core.load_channel_map(),
+        "customs_office_map": core.load_customs_office_map(),
+    })
+
+
+@app.route("/api/bl/mappings", methods=["POST"])
+def api_save_mappings():
+    payload = request.get_json(force=True)
+    pm = payload.get("port_map")
+    cm = payload.get("channel_map")
+    com = payload.get("customs_office_map")
+    if not isinstance(pm, dict) or not isinstance(cm, dict) or not isinstance(com, dict):
+        return jsonify({"ok": False, "error": "port_map / channel_map / customs_office_map 必须是对象"}), 400
+    ok1, origin = _norm_mapping(pm.get("origin"))
+    ok2, destination = _norm_mapping(pm.get("destination"))
+    ok3, channel = _norm_mapping(cm)
+    ok4, customs_office = _norm_mapping(com)
+    if not (ok1 and ok2 and ok3 and ok4):
+        return jsonify({"ok": False, "error": "映射的键和值都必须是字符串"}), 400
+    core.save_port_map({"origin": origin, "destination": destination})
+    core.save_channel_map(channel)
+    core.save_customs_office_map(customs_office)
+    return jsonify({
+        "ok": True,
+        "port_map": {"origin": origin, "destination": destination},
+        "channel_map": channel,
+        "customs_office_map": customs_office,
+    })
+
+
 # ---------- ① 上传报关底单 → 提取字段 → 返回 JSON ----------
 @app.route("/api/bl/extract", methods=["POST"])
 def api_extract():
@@ -95,17 +146,24 @@ def api_extract():
             except Exception as e:
                 warning = f"箱货清单解析失败：{e}"
 
-    # 可选：物流追踪表 xlsx → 用箱货清单的 FBA ID 匹配 ETD 开船日 → 覆盖「起运日期」
+    # 可选：物流追踪表 xlsx → 按 FBA ID 匹配 ETD/ETA/船名航次
     if "tracking" in request.files:
         tf = request.files["tracking"]
         if tf and tf.filename:
             t_saved = os.path.join(UPLOAD, f"{stamp}_{tf.filename}")
             tf.save(t_saved)
             try:
-                etd_map = core.parse_tracking_list(t_saved)
+                track_map = core.parse_tracking_list(t_saved)
                 for fid in fba_ids:
-                    if fid in etd_map:
-                        rec["起运日期"] = etd_map[fid]
+                    if fid in track_map:
+                        info = track_map[fid]
+                        if info.get("etd"):
+                            rec["起运日期"] = info["etd"]
+                        if info.get("vessel") and not (rec.get("船名航次") or "").strip():
+                            rec["船名航次"] = info["vessel"]
+                        arrival = core._arrival_date(info.get("etd"), info.get("eta"), express=core._is_express(channel, rec.get("运输方式")))
+                        if arrival:
+                            rec["申请日期"] = core._date_cn(arrival)
                         break
             except Exception as e:
                 msg = f"物流追踪表解析失败：{e}"
@@ -115,9 +173,9 @@ def api_extract():
     for key in ["总体积"]:
         rec.setdefault(key, "")
 
-    # 港口中文 → 英文（按 port_map 对照表，未命中保留中文供人工改）
-    core.apply_port_map(rec)
-    # 客户渠道 → 目的港英文（比中文港口名更精确，命中则覆盖）
+    # 港口中文 → 英文（按渠道大类 + 运输方式 + 运抵国）
+    core.apply_port_map(rec, channel)
+    # 客户渠道 → 目的港英文（非规则渠道兜底，命中则覆盖）
     core.apply_channel_map(rec, channel)
 
     # 保函「运输工具」为空（非海运单底单该列为 @ 占位符）→ 提示找供应商核实班列号/车次
@@ -170,17 +228,17 @@ def api_extract_batch():
     if not tickets:
         return jsonify({"ok": False, "error": "未收到任何票的报关底单"}), 400
 
-    # 2. 物流追踪表：解析一次，全局共享
-    etd_map = {}
+    # 2. 物流追踪表：解析一次，全局共享（{FBA ID: {etd, eta, vessel}}）
+    track_map = {}
     if "tracking" in request.files:
         tf = request.files["tracking"]
         if tf and tf.filename:
             tf_path = os.path.join(UPLOAD, f"tracking_{datetime.now().strftime('%Y%m%d%H%M%S%f')}.xlsx")
             tf.save(tf_path)
             try:
-                etd_map = core.parse_tracking_list(tf_path)
+                track_map = core.parse_tracking_list(tf_path)
             except Exception:
-                etd_map = {}
+                track_map = {}
 
     # 2b. 周汇总箱货清单：解析一次，全局共享（按工作号分组，供逐票匹配）
     weekly_groups = []
@@ -263,14 +321,21 @@ def api_extract_batch():
             except Exception as e:
                 warning = f"箱货清单解析失败：{e}"
 
-        # 物流追踪表：按 FBA ID 匹配 ETD 开船日 → 覆盖起运日期
+        # 物流追踪表：按 FBA ID 匹配 ETD/ETA/船名航次
         for fid in fba_ids:
-            if fid in etd_map:
-                rec["起运日期"] = etd_map[fid]
+            if fid in track_map:
+                info = track_map[fid]
+                if info.get("etd"):
+                    rec["起运日期"] = info["etd"]
+                if info.get("vessel") and not (rec.get("船名航次") or "").strip():
+                    rec["船名航次"] = info["vessel"]
+                arrival = core._arrival_date(info.get("etd"), info.get("eta"), express=core._is_express(channel, rec.get("运输方式")))
+                if arrival:
+                    rec["申请日期"] = core._date_cn(arrival)
                 break
 
-        # 港口/渠道映射
-        core.apply_port_map(rec)
+        # 港口/渠道映射（渠道大类 + 运输方式 + 运抵国）
+        core.apply_port_map(rec, channel)
         core.apply_channel_map(rec, channel)
 
         # 保函「运输工具」为空提醒

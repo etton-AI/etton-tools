@@ -62,13 +62,23 @@ PORT_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "port_m
 
 
 def load_port_map():
-    """读取港口中英对照表 {中文: 英文}。文件不存在或损坏返回空 dict。"""
+    """读取港口中英对照表，结构 {origin: {中文口岸: 英文}, destination: {中文运抵国: 英文}}。
+    文件不存在或损坏返回空结构。兼容旧版扁平格式：无 origin/destination 键时全量归 destination（历史主用途为运抵国映射）。"""
+    empty = {"origin": {}, "destination": {}}
     try:
         with open(PORT_MAP_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return empty
+        if "origin" in data or "destination" in data:
+            return {
+                "origin": data.get("origin") or {},
+                "destination": data.get("destination") or {},
+            }
+        # 旧版扁平格式：{中文: 英文}
+        return {"origin": {}, "destination": data}
     except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {}
+        return empty
 
 
 def save_port_map(pm):
@@ -85,14 +95,87 @@ def _is_english(s):
     return not re.search(r"[一-鿿]", s or "")
 
 
-def apply_port_map(rec):
-    """把 rec 里的「起运地/目的港」按 port_map 转英文；同时记录原始中文供记忆回写。"""
+# ---------- 渠道大类规则（客户渠道关键词 → 铁路/卡航/快递） ----------
+# 渠道大类来自箱货清单「客户渠道」列，与「运输方式」（底单提取）是两套维度：
+# 目的港/起运地按渠道大类分流（铁路/卡航/快递各有固定规则）。
+_CHANNEL_CATEGORY_KEYWORDS = [
+    ("铁路", ["铁路", "快铁", "铁派"]),
+    ("卡航", ["卡航"]),
+    ("快递", ["联邦", "空派"]),
+]
+# 渠道大类 → 目的港规则（按「运抵国」查）
+_ROUTE_DEST_RULES = {
+    "铁路": {"英国": "MALASZEWICZE", "德国": "DUISBURG"},
+    "卡航": {"英国": "THE UK", "德国": "GERMANY"},
+}
+# 快递渠道（香港联邦IP）固定起运地
+_EXPRESS_ORIGIN = "SHENZHEN"
+
+
+def _channel_category(channel):
+    """客户渠道名 → 大类（铁路/卡航/快递/None）。按关键词顺序匹配，先命中先返回。"""
+    ch = (channel or "").strip()
+    if not ch:
+        return None
+    for cat, kws in _CHANNEL_CATEGORY_KEYWORDS:
+        for kw in kws:
+            if kw in ch:
+                return cat
+    return None
+
+
+def _is_express(channel, mode):
+    """是否「快」渠道（空运/国际快递）——这类运输很快，缺 ETA 时不做 ETD+10 兜底。
+    海运/铁路/卡航等慢渠道才适用 ETD+10。"""
+    if (mode or "").strip() == "航空运输":
+        return True
+    if _channel_category(channel) == "快递":
+        return True
+    return False
+
+
+def apply_port_map(rec, channel=None):
+    """把 rec 里的「起运地/目的港」按对照表/渠道规则转英文；同时记录原始值供记忆回写。
+    起运港：
+      - 快递（香港联邦IP）→ 固定 SHENZHEN
+      - 海运（水路运输）→ 离境口岸 → port_map.origin
+      - 非海运（铁路/公路/航空）→ 关区名 → customs_office_map
+    目的港（按「运抵国」查，非「指运港」）：
+      - 铁路 → {英国:MALASZEWICZE, 德国:DUISBURG}
+      - 卡航 → {英国:THE UK, 德国:GERMANY}
+      - 其他 → port_map.destination。"""
     pm = load_port_map()
-    for key in ("起运地", "目的港"):
-        cn = (rec.get(key) or "").strip()
-        rec[f"_{key}_原始"] = cn
-        if cn and cn in pm:
-            rec[key] = pm[cn]
+    origins = pm.get("origin", {}) or {}
+    dests = pm.get("destination", {}) or {}
+    offices = load_customs_office_map()
+
+    cat = _channel_category(channel)
+    mode = (rec.get("运输方式") or "").strip()
+    office = (rec.get("关区名") or "").strip()
+    cn = (rec.get("起运地") or "").strip()   # extract 里「起运地」= 离境口岸（中文）
+    if cat == "快递":
+        rec["_起运地_原始"] = channel
+        rec["起运地"] = _EXPRESS_ORIGIN
+        rec["_起运地_固定"] = True
+    elif mode == "水路运输":
+        rec["_起运地_原始"] = cn
+        if cn and cn in origins:
+            rec["起运地"] = origins[cn]
+    else:
+        # 非海运：起运港取关区名（关区名缺失时保留离境口岸中文供人工填）
+        rec["_起运地_原始"] = office
+        if office and office in offices:
+            rec["起运地"] = offices[office]
+
+    country = (rec.get("运抵国") or "").strip()
+    rec["_目的港_原始"] = country
+    dest = None
+    if cat in _ROUTE_DEST_RULES and country in _ROUTE_DEST_RULES[cat]:
+        dest = _ROUTE_DEST_RULES[cat][country]
+    elif country in dests:
+        dest = dests[country]
+    if dest:
+        rec["目的港"] = dest
     # 保函「目的地」= 目的港，同步英文
     if rec.get("目的港"):
         rec["目的地"] = rec.get("目的港", "")
@@ -100,20 +183,78 @@ def apply_port_map(rec):
 
 
 def remember_ports(records):
-    """记忆回写：对比「原始中文港口」与「用户最终英文」，把新映射追加进 port_map.json。
-    返回是否新增。"""
+    """记忆回写：对比「原始中文」与「用户最终英文」，把新映射追加进对照表。
+    起运地按运输方式分流：海运 → port_map.origin（离境口岸），非海运 → customs_office_map（关区名）；
+    目的港 → port_map.destination。返回是否新增。"""
     pm = load_port_map()
+    origins = pm.setdefault("origin", {})
+    dests = pm.setdefault("destination", {})
+    offices = load_customs_office_map()
     changed = False
+    office_changed = False
     for rec in records:
-        for key in ("起运地", "目的港"):
-            cn = (rec.get(f"_{key}_原始") or "").strip()
-            en = (rec.get(key) or "").strip()
-            if cn and en and en != cn and cn not in pm and _is_english(en):
-                pm[cn] = en
-                changed = True
+        mode = (rec.get("运输方式") or "").strip()
+        cn = (rec.get("_起运地_原始") or "").strip()
+        en = (rec.get("起运地") or "").strip()
+        # 快递渠道起运地固定 SHENZHEN，无需记忆回写（_起运地_固定 标记）
+        if not rec.get("_起运地_固定") and cn and en and en != cn and _is_english(en):
+            if mode == "水路运输":
+                if cn not in origins:
+                    origins[cn] = en
+                    changed = True
+            else:
+                if cn not in offices:
+                    offices[cn] = en
+                    office_changed = True
+        cn = (rec.get("_目的港_原始") or "").strip()
+        en = (rec.get("目的港") or "").strip()
+        if cn and en and en != cn and cn not in dests and _is_english(en):
+            dests[cn] = en
+            changed = True
     if changed:
         save_port_map(pm)
-    return changed
+    if office_changed:
+        save_customs_office_map(offices)
+    return changed or office_changed
+
+
+# ---------- 关区名 → 起运港对照（customs_office_map.json，非海运票用） ----------
+# 非海运（铁路/公路卡航/航空）提单的起运港不取「离境口岸」（那是边境口岸），
+# 而是取报关单「海关编号」后面的关区名（报关关区 ≈ 发货城市），再查此表转英文。
+CUSTOMS_OFFICE_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "customs_office_map.json")
+
+
+def load_customs_office_map():
+    """读取关区名→英文起运港对照表 {关区名: 英文}。文件不存在或损坏返回空 dict。"""
+    try:
+        with open(CUSTOMS_OFFICE_MAP_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_customs_office_map(om):
+    """保存关区名→英文起运港对照表到 customs_office_map.json。"""
+    try:
+        with open(CUSTOMS_OFFICE_MAP_PATH, "w", encoding="utf-8") as f:
+            json.dump(om, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+def _customs_office_from_text(text):
+    """从报关单文本提取「海关编号」后面的关区名（如 增城海关 / 蓉青关 / 深圳湾关）。
+    格式：`海关编号：123... (增城海关)` 或 `海关编号：123... (7901) 蓉青关`。"""
+    m = re.search(r'海关编号[：:]?\s*(\d+)\s*[\(（]([^\)）]*)[\)）]', text)
+    if not m:
+        return ""
+    inner = m.group(2).strip()
+    if re.search(r'[一-鿿]', inner):      # 括号内是关区名
+        return inner
+    rest = text[m.end():]                 # 括号内是关区代码 → 关区名在括号后
+    n = re.search(r'([一-鿿][一-鿿关海]*关?)', rest)
+    return n.group(1) if n else ""
 
 
 # ---------- 渠道 → 目的港对照（channel_map.json，与箱货清单「客户渠道」关联） ----------
@@ -141,9 +282,12 @@ def save_channel_map(cm):
 
 def apply_channel_map(rec, channel):
     """按箱货清单「客户渠道」查 channel_map 覆盖目的港英文（比中文港口名更精确）。
+    仅对非铁路/卡航/快递渠道生效——这三类已由 _ROUTE_DEST_RULES 规则化，避免被旧 channel_map 覆盖。
     未命中保留原值；同时记录原始渠道供记忆回写。"""
     ch = (channel or "").strip()
     rec["_目的港_渠道"] = ch
+    if _channel_category(ch) is not None:
+        return rec
     cm = load_channel_map()
     if ch and ch in cm:
         rec["目的港"] = cm[ch]
@@ -154,12 +298,14 @@ def apply_channel_map(rec, channel):
 
 def remember_channels(records):
     """记忆回写：用户把目的港改成英文后，若该票带渠道，则把「渠道→英文目的港」记入 channel_map.json。
-    返回是否新增。"""
+    铁路/卡航/快递渠道规则化，不按渠道名记忆。返回是否新增。"""
     cm = load_channel_map()
     changed = False
     for rec in records:
         ch = (rec.get("_目的港_渠道") or "").strip()
         en = (rec.get("目的港") or "").strip()
+        if _channel_category(ch) is not None:
+            continue
         if ch and en and ch not in cm and _is_english(en):
             cm[ch] = en
             changed = True
@@ -330,17 +476,23 @@ def extract_customs_data(pdf_path, customer=DEFAULT_CUSTOMER):
         vessel = " ".join(w["text"] for w in crow if 380 <= w["x0"] < 500 and w["text"] != "@").strip()
         data["船名航次"] = vessel
 
-    # 5. 集装箱号（柜号）：备注行 4 位字母 + 7 位数字
-    data["柜号"] = _find_any(lines, r"[A-Z]{4}\d{7}") or ""
+    # 5. 集装箱号（柜号）：备注「集装箱标箱数及号码」上下文（避免全文本搜索误匹配提单号）
+    data["柜号"] = _container_numbers(lines)
 
     # 6. 件数 / 毛重 —— 按标签同列下方取值（文本层与 OCR 通用，避免 OCR 各列值错行）
     data["箱数"] = _value_by_label(lines, "件数")
     data["总重量"] = _value_by_label(lines, "毛重")
 
     # 7. 目的港 / 起运地 / 运抵国 —— 按标签同列下方取值（文本层与 OCR 通用，避免靠行内位置猜列）
-    data["起运地"] = _value_by_label(lines, "离境口岸")   # 离境口岸 = 起运地
+    data["起运地"] = _value_by_label(lines, "离境口岸")   # 离境口岸 = 起运地（海运票用）
     data["目的港"] = _value_by_label(lines, "指运港")     # 指运港 = 目的港
     data["运抵国"] = _value_by_label(lines, "运抵国")     # 运抵国（目的国），用于箱数/国家一致性校验
+
+    # 7b. 运输方式 + 关区名 —— 用于起运港分流：海运(水路运输)取离境口岸，非海运取「海关编号」后的关区名
+    full_text = " ".join(w["text"] for w in words)
+    m = re.search(r"(水路|铁路|公路|航空)运输", full_text)
+    data["运输方式"] = m.group(0) if m else ""
+    data["关区名"] = _customs_office_from_text(full_text)
 
     # 8. 起运日期（申报日期，取不到回退出口日期；8 位日期转 2026-07-13 格式）
     d = _value_by_label(lines, "申报日期") or _value_by_label(lines, "出口日期")
@@ -384,7 +536,7 @@ def _empty_record(customer=DEFAULT_CUSTOMER):
     cfg = get_customer_config(customer)
     return {
         "shipper": cfg["shipper_bl"], "consignee": cfg["consignee_bl"], "提单号": "", "系统SO": "", "柜号": "", "船名航次": "",
-        "起运地": "", "目的港": "", "运抵国": "", "箱数": "", "品名": "", "总重量": "", "总体积": "",
+        "起运地": "", "目的港": "", "运抵国": "", "运输方式": "", "关区名": "", "箱数": "", "品名": "", "总重量": "", "总体积": "",
         "起运日期": "", "申请单位": cfg["shipper_telex"], "收货人(保函)": cfg["consignee_telex"], "目的地": "", "运输工具": "",
         "申请日期": datetime.now().strftime("%Y 年 %m 月 %d 日"),
         "文件命名": "提单",
@@ -999,7 +1151,7 @@ def generate_batch(tickets, bl_template, out_dir, customer=DEFAULT_CUSTOMER, roo
         folder = t.get("folder") or rec.get("提单号") or f"提单_{i+1}"
 
         bl_name = derive_output_name(folder, "提单")
-        telex_name = derive_output_name(folder, "保函")
+        telex_name = derive_output_name(folder, "电放保函")
         ddan_name = derive_output_name(folder, "底单")
         safe_bl = re.sub(r'[\\/:*?"<>|]', "_", bl_name) or "提单"
         safe_telex = re.sub(r'[\\/:*?"<>|]', "_", telex_name) or "电放保函"
@@ -1115,6 +1267,27 @@ def _find_captured(lines, pattern):
         full = " ".join(w["text"] for w in words)
         m = re.search(pattern, full)
         if m: return m.group(1)
+    return ""
+
+
+def _container_numbers(lines):
+    """从备注「集装箱标箱数及号码」上下文提取柜号（4 字母 + 7 数字），多柜用分号拼接。
+
+    不能全文本 [A-Z]{4}\\d{7} 搜索——海运提单号（如 ZIMUNGB1391012S）也含此格式会被误匹配；
+    柜号固定出现在备注行「集装箱标箱数及号码：N;XXXX1234567;」里（海运/铁路底单格式一致）。
+    """
+    for words in lines.values():
+        full = " ".join(w["text"] for w in words)
+        m = re.search(r"集装箱标箱数及号码\s*[：:]?\s*\d+\s*[;；]", full)
+        if not m:
+            continue
+        nums = re.findall(r"[A-Z]{4}\d{7}", full[m.end():])
+        if nums:
+            seen = []
+            for n in nums:
+                if n not in seen:
+                    seen.append(n)
+            return ";".join(seen)
     return ""
 
 def _find_product_names(lines):
@@ -1461,12 +1634,14 @@ def _excel_date_str(v):
 
 
 def parse_tracking_list(xlsx_path):
-    """解析物流追踪表 xlsx，返回 { FBA ID: 'YYYY-MM-DD' }（ETD 开船日）。
+    """解析物流追踪表 xlsx，返回 { FBA ID: {etd, eta, vessel} }。
 
     物流追踪表多个 sheet（2023/2024/2025/最新物流动态/10月），表头位置不一：
-    - 「Shipment ID（FBA号）」在 A 列（新版）或 AA 列（2023/10月）
-    - 「ETD 开船日」在 D 列
-    遍历所有 sheet，按表头文字定位列，合并成 FBA ID -> ETD 索引（后 sheet 覆盖先 sheet）。
+    - 「Shipment ID（FBA号）」定位 FBA 列
+    - 「ETD」定位开船日列（etd，起运日期）
+    - 「ETA」定位到港日列（eta，算到港时间/申请日期）
+    - 「船名航次」/「航次」/「班列」定位船名航次列（vessel，铁路为班列号）
+    遍历所有 sheet，按表头文字定位列，合并成 FBA ID -> 信息索引（后 sheet 字段级覆盖先 sheet）。
     """
     wb = load_workbook(xlsx_path, data_only=True, read_only=True)
     index = {}
@@ -1474,7 +1649,7 @@ def parse_tracking_list(xlsx_path):
         rows = list(ws.iter_rows(values_only=True))
         if not rows:
             continue
-        sid_col = etd_col = None
+        sid_col = etd_col = eta_col = vessel_col = None
         header_row = None
         for i, row in enumerate(rows[:5]):
             if not row:
@@ -1483,9 +1658,13 @@ def parse_tracking_list(xlsx_path):
                 s = str(v).strip() if v is not None else ""
                 if "Shipment ID" in s or "FBA号" in s:
                     sid_col = j
+                if "ETA" in s:
+                    eta_col = j
                 if "ETD" in s:
                     etd_col = j
-            if sid_col is not None and etd_col is not None:
+                if "船名" in s or "班列" in s or "航次" in s:
+                    vessel_col = j
+            if sid_col is not None and (etd_col is not None or eta_col is not None):
                 header_row = i
                 break
         if header_row is None:
@@ -1494,11 +1673,54 @@ def parse_tracking_list(xlsx_path):
             if not row:
                 continue
             sid = str(row[sid_col]).strip() if sid_col < len(row) and row[sid_col] else ""
-            etd = _excel_date_str(row[etd_col]) if etd_col < len(row) and row[etd_col] else ""
-            if sid and etd:
-                index[sid] = etd
+            if not sid:
+                continue
+            info = index.setdefault(sid, {})
+            if etd_col is not None and etd_col < len(row) and row[etd_col]:
+                info["etd"] = _excel_date_str(row[etd_col])
+            if eta_col is not None and eta_col < len(row) and row[eta_col]:
+                info["eta"] = _excel_date_str(row[eta_col])
+            if vessel_col is not None and vessel_col < len(row) and row[vessel_col]:
+                info["vessel"] = str(row[vessel_col]).strip()
     wb.close()
     return index
+
+
+def _arrival_date(etd, eta, express=False):
+    """到港时间 = ETA 提前两天；若 ETA - ETD 不足 2 天，直接取 ETA。
+    缺 ETA 时（如铁路票 ETA 未填）退而求其次取 ETD + 10 天；两者皆缺返回空串。
+    快渠道（express=True，空运/国际快递）缺 ETA 不做 ETD+10 兜底，返回空串。"""
+    eta = (eta or "").strip()
+    etd = (etd or "").strip()
+    if not eta:
+        # 无 ETA：快渠道（空运/快递）直接返回空；慢渠道用 ETD + 10 天兜底
+        if express or not etd:
+            return ""
+        try:
+            return (datetime.strptime(etd, "%Y-%m-%d") + timedelta(days=10)).strftime("%Y-%m-%d")
+        except ValueError:
+            return ""
+    try:
+        eta_d = datetime.strptime(eta, "%Y-%m-%d")
+    except ValueError:
+        return eta
+    if etd:
+        try:
+            etd_d = datetime.strptime(etd, "%Y-%m-%d")
+            if (eta_d - etd_d).days < 2:
+                return eta
+        except ValueError:
+            pass
+    return (eta_d - timedelta(days=2)).strftime("%Y-%m-%d")
+
+
+def _date_cn(s):
+    """'YYYY-MM-DD' → 'Y 年 M 月 D 日'（对齐电放保函「申请日期」格式，不补零）。"""
+    try:
+        d = datetime.strptime((s or "").strip(), "%Y-%m-%d")
+        return f"{d.year} 年 {d.month} 月 {d.day} 日"
+    except ValueError:
+        return (s or "").strip()
 
 
 if __name__ == "__main__":

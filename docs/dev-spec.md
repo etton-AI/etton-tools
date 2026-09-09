@@ -603,15 +603,15 @@ interface PacificSplitResult {
 
 #### 核心业务规则
 
-- **字段提取**（`core.extract_customs_data`，横向 842×595 报关单，标签定位）：shipper=境内发货人左栏、consignee=境外收货人左栏、提单号=「提运单号」标签正下方同列值（`_value_by_label`，海运/铁路通用）、柜号=`[A-Z]{4}\d{7}` 正则（前缀 CIMU/WNGU/TIIU/TLLU 等，非参考实现的硬编码 `MATU`）、船名航次=「运输工具名称及航次号」标签紧邻下方同列值（`_value_below_label`，卡航填车架号如 `/91440112M0J494` 去开头 `/`），取不到回退备注「运输工具名称：XXX」、箱数/总重量=件数行的整数/小数、起运地/目的港=指运港行、起运日期=申报 8 位日期、品名=明细行「序号+10位商品编号+中文名」去重拼接
+- **字段提取**（`core.extract_customs_data`，横向 842×595 报关单，标签定位）：shipper=境内发货人左栏、consignee=境外收货人左栏、提单号=「提运单号」标签正下方同列值（`_value_by_label`，海运/铁路通用）、柜号=备注「集装箱标箱数及号码」上下文提取（`_container_numbers`，前缀 CIMU/WNGU/TIIU/TLLU 等，非参考实现的硬编码 `MATU`）、船名航次=「运输工具名称及航次号」标签紧邻下方同列值（`_value_below_label`，卡航填车架号如 `/91440112M0J494` 去开头 `/`），取不到回退备注「运输工具名称：XXX」、箱数/总重量=件数行的整数/小数、起运地/目的港=指运港行、起运日期=申报 8 位日期、品名=明细行「序号+10位商品编号+中文名」去重拼接
 - **提单模板** 12 个 MERGEFIELD 邮件合并域（`shipper/consignee/提单号/柜号/船名航次/起运地/目的港/箱数/品名/总重量/总体积/起运日期`），`clean_template.dedupe_template` 先去重重复域（如「起运日期」出现 6 次、「目的港」4 次），再用 docx-mailmerge 填域保格式不漂移
 - **保函程序重建**（`fill_telex_docx`）：TO/FROM/提单号/运输工具/**柜号**/目的地/收货人/申请单位/申请日期，逐行 `python-docx` 生成
 - **收货人(保函) 与 consignee 独立**：提单 consignee 用「大写无空格」（`HONGKONGLIXIANG...`），保函收货人用「正常大小写带空格」（`Hong Kong Lixiang...`），审核表两列独立可编辑，`build_review_excel`/`parse_review_excel` 完整回读
 - **拓锐固定 shipper/consignee（硬编码）**：该客户发货人/收货人固定不变，直接常量覆盖——`SHIPPER_BL`（3 行英文：`GUANGZHOU TUORUI TECHNOLOGY CO., LTD` + 2 行地址）、`CONSIGNEE_BL`（`HONG KONG LIXIANG TRADING COMPANY LIMITED`）；保函对应 `SHIPPER_TELEX`/`CONSIGNEE_TELEX`（正常大小写带空格）。来源=正确提单/保函，取值见 `core.py` 顶部常量
 - **箱货清单（可选上传，参考箱单发票）**：`parse_packing_list(xlsx)` 定位「英文品名/中文品名/体积/货箱重量/FBA ID/客户渠道」表头（跳过表头行，避免表头字被当成品名），英文品名去重后覆盖提单「品名」（每行一个品名）、「体积」列求和覆盖「总体积(CBM)」（**无「体积」列时回退「长×宽×高×总箱数/1e6」**）、FBA ID 去重供物流追踪表匹配、「客户渠道」列取首个非空值供渠道→目的港映射；`/api/bl/extract` 额外接受 `packing=` xlsx，响应加 `warning`（解析失败为非阻断提示，仍返回底单提取结果）
 - **周汇总箱货清单（可选，整周一份）**：用户按周导出的整份箱货清单（多票合并一个 xlsx），`parse_packing_list_weekly(xlsx)` 按「工作号」列分组（每组=国家/渠道/箱数/重量/品名/体积），`match_weekly_packing(rec, groups)` 用「运抵国 + 件数(箱数) + 毛重」回溯匹配每票底单对应的**一个或多个工作号**（一票合并报关常对应多工作号，凑箱数 + 验重量容差 1.0kg），命中则覆盖品名/总体积/渠道/箱数/国家。匹配失败回退文件夹内单票清单（`packing_{i}`）。`extract-batch` 额外接受 `weekly_packing=` xlsx
-- **物流追踪表（可选上传）**：`parse_tracking_list(xlsx)` 遍历所有 sheet（2023/2024/2025/最新物流动态/10月），按表头文字定位「Shipment ID（FBA号）」与「ETD 开船日」列，合并成 `FBA ID → ETD` 索引。用箱货清单的 FBA ID 匹配后，`ETD 开船日`（如 `2026-05-14`）覆盖提单「起运日期」（ON BOARD 日期），匹配不到则回退底单申报日期。**「船名航次」维持底单提取，不用物流追踪表**（用户决策）。`/api/bl/extract` 额外接受 `tracking=` xlsx
-- **港口英文（中文名查表 + 渠道查表，双映射自动记忆）**：①`port_map.json`（中文港口→英文，如「盐田」→`YANTIAN`），`apply_port_map` 把「起运地/目的港」按中文名转英文；②`channel_map.json`（客户渠道→目的港英文，如「易·22日达卡派包税」→`LONG BEACH,CA`、「易·15日达卡派包税」→`LOS ANGELES,CA`），`apply_channel_map` 按箱货清单「客户渠道」覆盖目的港（比中文港口名更精确）。extract 里先 `apply_port_map` 后 `apply_channel_map`（渠道命中则覆盖）；generate 里 `remember_ports` + `remember_channels` 把人工修正后的中→英/渠道→港新映射回写 json（自动积累，免手工维护对照表）
+- **物流追踪表（可选上传）**：`parse_tracking_list(xlsx)` 遍历所有 sheet（2023/2024/2025/最新物流动态/10月），按表头文字定位「Shipment ID（FBA号）」+「ETD」+「ETA」+「船名航次/班列」列，合并成 `FBA ID → {etd, eta, vessel}` 索引。用箱货清单的 FBA ID 匹配后：`etd` 覆盖提单「起运日期」（ON BOARD 日期）；`eta` 经 `_arrival_date`（ETA−2天，ETA−ETD<2天取 ETA）算到港时间 → 电放保函「申请日期」；`vessel` 在底单船名航次为空时补入（铁路班列号）。匹配不到回退底单申报日期/今天。`/api/bl/extract` 额外接受 `tracking=` xlsx
+- **港口英文（起运港按渠道大类+运输方式分流；目的港按渠道大类+运抵国）**：①`port_map.json`（结构化 `{origin: 离境口岸→英文, destination: 运抵国→英文}`）；②`customs_office_map.json`（非海运票关区名→起运港英文，如「增城海关」→`GUANGZHOU`）；③`channel_map.json`（非规则渠道名→目的港英文）。`_channel_category` 按客户渠道关键词分大类：铁路（含`铁路`/`快铁`/`铁派`）、卡航（含`卡航`）、快递（含`联邦`/`空派`）。`apply_port_map(rec, channel)` 分流——起运港：快递→固定 `SHENZHEN`，海运→离境口岸→origin，非海运→关区名→customs_office_map；目的港（按「运抵国」）：铁路→{英国:`MALASZEWICZE`,德国:`DUISBURG`}、卡航→{英国:`THE UK`,德国:`GERMANY`}、其他→destination。`apply_channel_map` 仅对非规则渠道用 channel_map 兜底（避免旧 channel_map 覆盖铁路/卡航规则）。generate 里 `remember_ports`（快递起运地固定不记忆）+ `remember_channels`（非规则渠道）回写 json（自动积累）
 - **品名翻译兜底**：未上传箱货清单时，底单中文品名经 `PRODUCT_EN_MAP`（灯具词典）翻译成英文并大写换行；上传箱货清单则直接用其英文品名（权威，含 `Cilp` 等源数据原始拼写）。提单品名**保留空格**（`CILP TABLE LAMP` 原样，不连写——正确提单本身是带空格的，早期「连写去空格」是误解已回退）
 - **扫描件 OCR 兜底**：无文字层的扫描底单 `extract_words` 返回空 → 走 RapidOCR（`_get_ocr` + `_ocr_page_to_words`）识别文字后复用同一套「标签定位」提取；扫描报关单多为竖版 594×843 而内容横排，OCR 前先 `np.rot90(arr, k=1)` 逆时针转正；OCR 失败才回退 `_empty_record()` 全空字段供人工填写
 - **拆分底单合并**（`merge_declaration_pdfs`，pypdf）：按文件名关键词排序 `报(报关单)→放(放行单)→委托(委托书)` 后合并。⚠️ 上传保存时必须**保留原始文件名**（`batch_{i}_{j}_{stamp}_{原文件名}.pdf`），否则排序 key 丢失会误把委托书当第一页
@@ -1148,6 +1148,35 @@ interface PacificSplitResult {
     - 根因：LibreOffice headless 首次运行需写 `$HOME/.config` 建 profile，非 root 且无 HOME 时 soffice 会静默失败 → 特意用 root；`soffice` 报的 `Warning: failed to launch javaldx` 是 Java 不可用的无害警告，writer_pdf_Export 不依赖 Java
     - 处理：暂保持 root（功能优先）；如未来 namespace 升级 enforce，需 Dockerfile 设 `ENV HOME=/tmp` + deployment 加 `runAsNonRoot/runAsUser/capabilities.drop=["ALL"]/seccompProfile`
     - 位置：`k8s/bl-service-deploy.yaml`、`bl-service/Dockerfile`
+
+80. **port_map.json 从扁平改为结构化 `{origin, destination}`；新增 `/bl-mapping` 在线编辑入口** (2026-09-09)
+    - 动机：原 `port_map.json` 是扁平 `{中文: 英文}`，把「离境口岸」（起运港）和「运抵国」（目的港）混在一张表，语义不清、编辑时难区分；用户需要能直接编辑起运港/目的港映射的入口
+    - 改动：`port_map.json` 改为 `{origin: {离境口岸→英文}, destination: {运抵国→英文}}`；`load_port_map` 兼容旧扁平格式（无 origin/destination 键时全量归 destination 兜底）；`apply_port_map` 起运地查 origin、目的港查 destination；`remember_ports` 分别回写 origin/destination
+    - 入口：新增 `/bl-mapping` 页面（三个可增删改表：起运港/目的港/渠道）+ `GET/POST /api/bl/mappings`（读写两个 json，键值校验必须为字符串）
+    - 位置：`bl-service/core.py`（load/apply/remember）、`bl-service/review_app.py`（mappings 接口）、`src/app/bl-mapping/page.tsx`
+
+81. **起运港按运输方式分流 + 新增关区名映射 `customs_office_map.json`** (2026-09-09)
+    - 动机：非海运票（铁路/公路卡航/航空）的「离境口岸」是边境口岸（如阿拉山口、霍尔果斯），不代表实际发货城市；真正的起运港应取报关单「海关编号」后面的**关区名**（报关关区 ≈ 发货城市，如增城海关→广州、蓉青关→成都）
+    - 规则：`apply_port_map` 按「运输方式」分流起运港——海运（`水路运输`）→离境口岸→`port_map.origin`；非海运（`铁路运输`/`公路运输`/`航空运输`）→关区名→`customs_office_map.json`。目的港仍走 `port_map.destination`。`remember_ports` 对称回写（海运→origin、非海运→customs_office_map）
+    - 关区名提取：`_customs_office_from_text` 正则 `海关编号[：:]?\s*(\d+)\s*[\(（]([^\)）]*)[\)）]`，兼容 `(增城海关)` 和 `(7901) 蓉青关` 两种格式；OCR 扫描件偶发括号丢失（如塔城海关）需人工兜底
+    - 历史扫描：1-7月 48 票底单，海运 20 票（5 离境口岸：外高桥9/盐田5/宁波北仑3/南沙港一期2/烟台1）+ 非海运 28 票（7 关区名：增城10/渝州6/塔城4/蓉青3/车站2/深圳湾2/都拉塔1），无航空
+    - 入口：`/bl-mapping` 在 #80 三表基础上新增第 4 表「关区名映射」；`review_app.py` 的 `GET/POST /api/bl/mappings` 加 `customs_office_map` 读写
+    - 位置：`bl-service/core.py`（`_customs_office_from_text`/load/apply/remember）、`bl-service/customs_office_map.json`、`bl-service/review_app.py`、`src/app/bl-mapping/page.tsx`
+
+82. **渠道大类规则 + 追踪表扩展解析 ETA/船名航次 + 电放保函申请日期=到港时间** (2026-09-09)
+    - 动机：①目的港/起运地需按「渠道大类」（铁路/卡航/快递）区分，而非单一 destination 映射——铁路到德国要 `DUISBURG`（非 destination 里的 `MALASZEWICZE`）、卡航目的港写国家名（`THE UK`/`GERMANY`）、快递（香港联邦IP）起运地固定 `SHENZHEN`；②铁路底单无船名航次，需从追踪表取班列号；③电放保函「申请日期」= 到港时间（ETA 提前两天）
+    - 渠道大类：`_channel_category` 按客户渠道关键词分（铁路含`铁路`/`快铁`/`铁派`，卡航含`卡航`，快递含`联邦`/`空派`），顺序匹配先命中先返回（避免「铁路卡派」误判为卡航）
+    - `apply_port_map(rec, channel)` 分流：起运港 快递→`SHENZHEN`/海运→离境口岸→origin/非海运→关区名→customs_office_map；目的港（改按「运抵国」查，修正原用「指运港」查 destination 的错位）铁路→`{英国:MALASZEWICZE,德国:DUISBURG}`、卡航→`{英国:THE UK,德国:GERMANY}`、其他→destination
+    - `apply_channel_map` 仅对非规则渠道用 channel_map 兜底（否则旧 channel_map「欧洲铁路包税--卡派→MALASZEWICZE」会把铁路德国票的 DUISBURG 错误覆盖回 MALASZEWICZE）；`remember_ports` 快递起运地固定不记忆、`remember_channels` 规则渠道不记忆
+    - 追踪表：`parse_tracking_list` 返回 `{FBA ID: {etd, eta, vessel}}`（表头含 ETD/ETA/船名航次定位列）；`_arrival_date(etd, eta)`=ETA−2天、ETA−ETD<2天取 ETA；`_date_cn` 转「Y 年 M 月 D 日」填「申请日期」
+    - 文件命名：`derive_output_name(folder, "保函")` → `"电放保函"`（对齐 specs 的 `{命名}电放保函.docx`）
+    - 位置：`bl-service/core.py`、`bl-service/review_app.py`
+
+83. **柜号误匹配提单号（海运多票复现）** (2026-09-09)
+    - 症状：柜号应填 `GOSU1060349`，提单/电放保函却写成 `UNGB1391012`（实为提单号 `ZIMUNGB1391012S` 的中间段 `UNGB1391012`），多票海运都错
+    - 根因：柜号原用全文本 `_find_any(lines, r"[A-Z]{4}\d{7}")` 取第一个匹配，但海运提单号（如 `ZIMUNGB1391012S`）里 `UNGB1391012` 恰是「4 字母 + 7 数字」，且提单号行 y 比备注行更靠前，被误当柜号
+    - 修复：新增 `_container_numbers`，只在备注「集装箱标箱数及号码：N;XXXX1234567;」上下文里 `findall` 柜号（海运/铁路底单格式一致），多柜分号拼接去重；无该上下文返回空（宁缺勿错，不再全文本兜底）
+    - 位置：`bl-service/core.py`（`_container_numbers` + `extract_customs_data` 第 5 步柜号）
 
 ### 待重构项
 

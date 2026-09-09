@@ -10,7 +10,7 @@
 文件夹(每子文件夹=一票) ──①批量提取──> 字段 ──②审核表(标红:空白/中文)──> 人工确认 ──③生成──> 提单.pdf + 电放保函.docx + 底单.pdf → ZIP
     箱货清单xlsx(同文件夹,可选) ──①补充──> 英文品名 + 总体积 + 国家/箱数(校验)
     周汇总箱货清单xlsx(整周一份,可选) ──①按工作号分组+匹配──> 每票品名/体积/渠道（匹配不到回退单票清单）
-    物流追踪表xlsx(单独上传,可选) ──①匹配──> FBA ID→ETD 开船日 → 起运日期（覆盖）
+    物流追踪表xlsx(单独上传,可选) ──①匹配──> FBA ID→ETD/ETA/船名航次 → 起运日期(ETD) + 申请日期(ETA-2天) + 铁路船名航次
     拆分底单(报/放/委托) ──①合并──> 一份报关底单
 ```
 
@@ -36,6 +36,8 @@
 | **箱货清单「英文品名」列** | **品名（去版本号 + 去重后覆盖）** | — |
 | **箱货清单「体积」列求和** | **总体积(CBM)（覆盖）** | — |
 | **物流追踪表「ETD 开船日」（按 FBA ID 匹配）** | **起运日期（覆盖）** | — |
+| **物流追踪表「ETA 到港日」（按 FBA ID 匹配）** | — | **申请日期（=到港时间：ETA−2天；ETA−ETD<2天取 ETA）** |
+| **物流追踪表「船名航次/班列号」（按 FBA ID 匹配）** | **船名航次（底单为空时补入，铁路班列号）** | — |
 | **箱货清单「客户渠道」** | **目的港（按 channel_map 覆盖）** | **目的地（同步）** |
 
 > 起运日期落提单时转 `DD MMM YYYY`（如 `2026-05-14` → `14 MAY 2026`，带空格）；品名落提单时保留空格、全大写（如 `BLUE OCEAN DREAM GALAXY PROJECTOR`），并去掉末尾版本号（`3.0`/`2.0`）。
@@ -50,11 +52,21 @@
 - 箱货清单**无「体积」列**时（如海运单 TRKJ26050005），回退用「长(CM)×宽(CM)×高(CM)×总箱数(CTN) / 1e6」算体积。
 - 未上传箱货清单时，底单中文品名经 `PRODUCT_EN_MAP` 词典翻译兜底（同样去版本号 + 全大写）。
 
-## 港口英文（中文名查表 + 渠道查表，双映射自动记忆）
+## 港口英文（起运港按渠道大类 + 运输方式分流；目的港按渠道大类 + 运抵国）
 
-- `port_map.json`：中文港口 → 英文（如 `盐田` → `YANTIAN`）。`apply_port_map` 把「起运地/目的港」按中文名转英文，未命中保留中文供人工填。
-- `channel_map.json`：客户渠道 → 目的港英文（如 `易·22日达卡派包税` → `LONG BEACH,CA`、`易·15日达卡派包税` → `LOS ANGELES,CA`）。同一目的国不同渠道对应不同港口，渠道比中文港口名更精确——`apply_channel_map` 按箱货清单「客户渠道」覆盖目的港。
-- **自动记忆**：generate 阶段 `remember_ports`（中文港口→英文）+ `remember_channels`（渠道→港口），把人工修正后的新映射回写 json，随日常使用自动积累，免手工维护对照表。
+- **起运港分流**（`apply_port_map`，先按渠道大类、再按运输方式）：
+  - 快递渠道（客户渠道含 `联邦`/`空派`，如「香港联邦IP」）→ 固定 `SHENZHEN`。
+  - 海运（`水路运输`）→ 取「离境口岸」中文 → 查 `port_map.origin`（如 `南沙港一期码头`→`NANSHA`、`外高桥`→`SHANGHAI`、`盐田`→`YANTIAN`）。
+  - 非海运（`铁路运输`/`公路运输`/`航空运输`）→ 取「海关编号」后面的**关区名** → 查 `customs_office_map`（如 `增城海关`→`GUANGZHOU`、`蓉青关`→`CHENGDU`、`渝州海关`→`CHONGQING`、`车站海关`→`XIAN`）。关区名缺失时保留离境口岸中文供人工填。
+- **目的港分流**（按「运抵国」查，规则见 `_ROUTE_DEST_RULES`）：
+  - 铁路渠道（客户渠道含 `铁路`/`快铁`/`铁派`）→ 英国→`MALASZEWICZE`、德国→`DUISBURG`。
+  - 卡航渠道（客户渠道含 `卡航`）→ 英国→`THE UK`、德国→`GERMANY`。
+  - 其他 → 查 `port_map.destination`（运抵国→英文）。
+- `port_map.json`：**结构化** `{ origin: 离境口岸→英文, destination: 运抵国→英文 }`。未命中保留中文供人工填。
+- `customs_office_map.json`：非海运票的**关区名 → 起运港英文**对照（报关关区 ≈ 发货城市，比边境离境口岸更贴近实际起运地）。
+- `channel_map.json`：非规则渠道（如海运「美转加」系列）的**渠道名 → 目的港英文**精确映射，`apply_channel_map` 兜底；铁路/卡航/快递三类已规则化，不再走 channel_map。
+- **自动记忆**：generate 阶段 `remember_ports`（海运起运地→origin、非海运关区名→customs_office_map、目的港→destination，快递起运地固定不记忆）+ `remember_channels`（非规则渠道→港口），把人工修正后的新映射回写 json。
+- **在线编辑入口**：`/bl-mapping` 页面可增删改四类映射（起运港 / 目的港 / 渠道 / 关区名），经 `GET/POST /api/bl/mappings` 读写三个 json，保存后下次提取即生效。
 
 ## 接口契约
 
@@ -69,6 +81,8 @@
   - 响应：`{ ok, zip, previews:[{folder, bl, telex}] }`（相对路径，经 `/api/bl/file/<rel>` 访问）
   - ZIP 含三份：`{命名}提单.pdf` + `{命名}电放保函.docx` + `{命名}底单.pdf`（命名 = 文件夹名把「易通报关资料」替换成类型词）
 - `GET /api/bl/file/<path:rel>` —— 生成文件服务（ZIP 下载 / 提单·保函 PDF 预览）
+- `GET /api/bl/mappings` —— 返回 `{ ok, port_map:{origin,destination}, channel_map, customs_office_map }`
+- `POST /api/bl/mappings`（`{ port_map:{origin,destination}, channel_map, customs_office_map }`）—— 保存映射（键值均为字符串，非法返回 400）
 
 ## 关键实现
 
@@ -82,7 +96,7 @@
 
 - `fill_telex_docx` 用 python-docx 逐段生成，字体/字号/对齐/边距/标点严格对齐参考「拓锐6月电放保函」模板：中文宋体/等线、英文 Times New Roman；标题 17/15pt、正文 14pt、声明 12pt bold（对齐 Heading3 默认）；页边距上 2.61/下 0/左 3.15/右 2.29cm、header_distance 1.63cm。
 - **页眉**：客户公司名（拓锐=`广州拓锐科技有限公司`，取自 `CUSTOMERS` 配置）等线 15.5pt bold + 底边框黑色分隔线（0.75pt、宽 415.35pt，右缩进 42.35pt 对齐标准答案 shape 宽度）。
-- 字段含 `柜号 (CONTAINER NO.)` 行；TO / FROM / 申请单位 / 申请日期用全角冒号，字段标签用英文冒号+空格；申请日期无前导零（`2026 年 7 月 8 日`）。
+- 字段含 `柜号 (CONTAINER NO.)` 行；TO / FROM / 申请单位 / 申请日期用全角冒号，字段标签用英文冒号+空格；申请日期无前导零（`2026 年 7 月 8 日`）。**申请日期 = 到港时间**（物流追踪表 ETA 提前两天，ETA−ETD<2 天取 ETA；无追踪表回退今天）。
 - 收货人(保函) 与 consignee 独立：提单用大写无空格、保函用正常大小写带空格。
 
 ## 已验证（2026-09-04，拿 6 月真实底单比对）
@@ -99,6 +113,7 @@
 - **PDF 生成（原生 LibreOffice）**：本机装 LibreOffice 26.8.0，`docx_to_pdf()` 经 `_find_soffice()` 定位 `soffice.exe` 转 PDF。全链路（`:3001` 代理 → Flask `:5000`）实测 ZIP 含 `提单.pdf`(397KB) + `电放保函.pdf`(69KB)，不再依赖 Docker。
 - **提单号 = 底单「提运单号」标签取值**：`_value_by_label(lines, "提运单号")` 直接定位标签、取下方同列值，海运/铁路布局通用。实测铁路单取 `800620260613122207`、海运单（BG20260508013）取 `G2605115309`（原逻辑对海运单取空）。
 - **海运单（BG20260508013 + 箱货清单 TRKJ26050005）全字段实测**：提单号 `G2605115309`、船名航次 `UN9949778/009E`、柜号 `FFAU6162017`、箱数 45、总重量 695.11、总体积 `3.8859`（无「体积」列，回退长宽高×箱数算出）、品名 4 个英文（含 `INS STYLE NORTHERN LIGHTS NIGHT LIGHT` 北极光灯）。
+- **柜号 = 备注「集装箱标箱数及号码」上下文提取**（2026-09-09）：`_container_numbers` 从备注行 `集装箱标箱数及号码：N;XXXX1234567;` 里 findall 柜号（海运/铁路格式一致），多柜分号拼接去重。不再用全文本 `[A-Z]{4}\d{7}` 搜索——海运提单号（`ZIMUNGB1391012S`）含 `UNGB1391012` 会被误当柜号（多票复现）。
 - **排版修复（2026-09-05）**：①提单运费恢复带空格「FREIGHT PREPAID」+ 文本框加宽 96→115pt，PDF 完整单行显示（对齐正确提单，正确提单是**带空格**非连写）；②品名恢复带空格（`CILP TABLE LAMP` 原样）+ 品名文本框 109→240pt + 左对齐，4 个品名全部单行、不换行、不溢出；③起运日期转 `DD MMM YYYY`（`2026-05-14` → `14 MAY 2026`，带空格）。
 - **港口/渠道映射（2026-09-05）**：海运单渠道「易·22日达卡派包税」→ 目的港 `LONG BEACH,CA`、起运地 `YANTIAN`；提单 + 电放保函「目的地」均正确落位（`DESTINATION：LONG BEACH,CA`）。
 - **7 项格式修复（2026-09-05，本地实测）**：①shipper/consignee/品名文本框段落加 `<w:jc w:val="left"/>` 左对齐，消除 LibreOffice 默认 justify 导致的中间大空格；②「SHIPPED ON BOARD」「FREIGHT PREPAID」恢复中间空格；③起运日期三处（SHIPPED ON BOARD / LADEN ON BOARD / Place and date of issue）统一 `14 MAY 2026`；④目的港左列 Port of Discharge（Text Box 10）LibreOffice 把 `margin:align left` 误渲染到右列（x0≈172），改 `column:posOffset=0` + VML `margin-left:0pt` 修复——现 Port of Discharge=x0≈43（左）、Place of Delivery=x0≈180（右），与正确提单一致。⑤物流追踪表上传入口已在前端 `/bl-review` 提供（用 FBA ID 匹配 ETD 覆盖「起运日期」）。
