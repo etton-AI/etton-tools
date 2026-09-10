@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
 // ============================================================
@@ -356,14 +357,22 @@ export default function BlReviewPage() {
             按文件夹批量上传 → 自动提取 → <span className="font-semibold text-primary">人工审核</span> → 生成提单 & 电放保函
           </p>
         </div>
-        {hasResult && (
-          <button
-            onClick={reset}
+        <div className="flex items-center gap-2">
+          <Link
+            href="/bl-mapping"
             className="inline-flex items-center gap-2 rounded-lg border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-50 transition-colors"
           >
-            重新上传
-          </button>
-        )}
+            🗺️ 港口 / 渠道映射设置
+          </Link>
+          {hasResult && (
+            <button
+              onClick={reset}
+              className="inline-flex items-center gap-2 rounded-lg border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-50 transition-colors"
+            >
+              重新上传
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Upload Area */}

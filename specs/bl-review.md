@@ -66,7 +66,7 @@
 - `customs_office_map.json`：非海运票的**关区名 → 起运港英文**对照（报关关区 ≈ 发货城市，比边境离境口岸更贴近实际起运地）。
 - `channel_map.json`：非规则渠道（如海运「美转加」系列）的**渠道名 → 目的港英文**精确映射，`apply_channel_map` 兜底；铁路/卡航/快递三类已规则化，不再走 channel_map。
 - **自动记忆**：generate 阶段 `remember_ports`（海运起运地→origin、非海运关区名→customs_office_map、目的港→destination，快递起运地固定不记忆）+ `remember_channels`（非规则渠道→港口），把人工修正后的新映射回写 json。
-- **在线编辑入口**：`/bl-mapping` 页面可增删改四类映射（起运港 / 目的港 / 渠道 / 关区名），经 `GET/POST /api/bl/mappings` 读写三个 json，保存后下次提取即生效。
+- **在线编辑入口**：`/bl-mapping` 页面可增删改四类映射（起运港 / 目的港 / 渠道 / 关区名），经 `GET/POST /api/bl/mappings` 读写三个 json，保存后下次提取即生效；`/bl-review` 页面顶部有「🗺️ 港口 / 渠道映射设置」按钮跳转到 `/bl-mapping`。
 
 ## 接口契约
 
