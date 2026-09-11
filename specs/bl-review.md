@@ -46,6 +46,27 @@
 
 - `SHIPPER_BL`（3 行英文）、`CONSIGNEE_BL`、`SHIPPER_TELEX`、`CONSIGNEE_TELEX` 硬编码在 `core.py` 顶部，覆盖底单提取的中文名。来源=正确提单/保函。
 
+## 星速(HNXS) 客户（Amazon FBA 直送，无电放保函）
+
+- 加客户只需在 `core.py` 的 `CUSTOMERS` 里加 `"星速"` 一项；字段如下：
+  - `shipper_bl = None` → 变量发货人：境内发货人中文经 `_cn_to_pinyin_upper`（剔除括号备注 → `pypinyin.lazy_pinyin` 拼接 → `upper()`）转拼音大写（如 `湖南永高商贸有限公司` → `HUNANYONGGAOSHANGMAOYOUXIANGONGSI`）。
+  - `consignee_bl = "AMAZONFULFILMENTCENTER"`、`notify_bl = "SAMEASCONSIGNEE"`（固定）。
+  - `no_telex = True` → generate 跳过电放保函，ZIP 只含 `{命名}-提单.pdf`（星速底单不打包，ZIP 不含底单、无保函、无 preview 保函）。
+  - **提单模板**：与拓锐共用同一 `提单模板.docx` 邮件合并模板（`fill_bl_docx`），不单独生成极简版——shipper 拼音大写、consignee/notify 固定值、唛头 `N/M`、装卸 `CFS TO CFS`、单位 `CTNS`/`KGS`/`CBM`、`FREIGHT PREPAID`、`SHIPPED ON BOARD:` 均由模板静态文字 + 12 个 MERGEFIELD 域呈现（2026-09-11 起）。
+- **数据源差异**：无「物流追踪表」，改由「订单列表」xlsx 提供匹配（发往国家/开船时间/业务类型/船名/船次/供应渠道/客户渠道/总CBM/总KG/总箱数）；`parse_order_list(xlsx)` 按 FBA ID 建索引（`load_workbook(data_only=True)`，**不可 read_only=True** 否则只读到表头行）。
+- **箱货清单 FBA 分组**：星速箱货清单的 FBA ID = 基础 12 位（`FBA`+9 位）+ `U` + 6 位序号 = 19 位；`parse_packing_list_xs` 用 `_base_fba` 截前 12 位分组，供品名/系统SO 匹配（英文品名去版本号 + 去空格 + 大写）。
+- **多 FBA**：底单文件名有两种多 FBA 写法——逗号分隔完整 FBA（`FBA15LZW7KR4,FBA15M03GFHD`，同订单一行）与 `+6位后缀` 缩写（`FBA15M0WQDJZ+0S50DJ`，两单合拼，第二个 FBA 与前一个共享前 6 位 `FBA15M`）。`_fbas_from_text` 解析全部 FBA，`xs_apply_packing` 统一回填：品名跨 FBA 去重合并、体积按唯一订单行（系统SO 去重）求和。
+- **目的港映射**（`apply_xs_map`）：
+  - 海运（`水路运输`）→ 实际港口：英国`FELIXSTOWE`、德国`ROTTERDAM,NL`、法国`ROTTERDAM,NL`、荷兰`ROTTERDAM,NL`。
+  - 陆运（`公路运输`）→ 国家英文名：英国`BRITAIN`、德国`GERMANY`、法国`FRANCE`、荷兰`NETHERLANDS`。
+  - 加拿大（美转加，按「供应渠道」分流）：含 `美森`/`CLX` → `LONGBEACH,CA`，否则 → `LOSANGELES,CA`；直航加拿大（加东/加西普船）留空人工填。
+- **起运港映射**：海运取「离境口岸」→ 查 `port_map.json` 的 `origin`（`盐田`→`YANTIAN`、`外高桥`→`SHANGHAI`、`南沙港一期码头`→`NANSHA`），无对照时保留中文人工填；陆运固定 `SHENZHEN`。
+- **体积** = 订单列表「总CBM」列（多 FBA 按唯一订单行求和）。
+- **起运日期** = 订单列表「开船时间」（无条件覆盖，`_excel_date_str` 剥离 `00:00:00` 时分秒）；**船名航次** = 订单列表船名+船次拼接。
+- **FBA 匹配**：`extract_customs_data` 里星速用 `_fba_from_text` 从报关单全文取 FBA；`review_app` extract-batch 里调用 `xs_apply_packing(rec, folder, xs_packing, order_map)` 统一回填（品名/体积/系统SO/起运地/目的港/起运日期/船名航次）。
+- **前端**：`/bl-review` 选「星速」后，上传区把「周汇总箱货清单」换成「箱货清单」+ 新增「订单列表」入口，隐藏「物流追踪表」；每个 PDF 独立成一票（按文件名里的 FBA 号分组，xlsx 忽略）；保函预览/生成按钮隐藏。客户选择持久化到 `localStorage`（刷新不重置回拓锐）；星速目录上传时 `File.name` 可能带相对路径前缀（如 `7月底单/xxx.pdf`），先 `split("/").pop()` 取纯文件名再归组。
+- 依赖：`requirements.txt` 新增 `pypinyin>=0.51`。
+
 ## 箱货清单汇总（品名英文 + 总体积）
 
 - `parse_packing_list(xlsx)` 定位「系统SO/英文品名/中文品名/体积/货箱重量/FBA ID/客户渠道」表头（跳过表头行），系统SO 去重供审核表展示（方便查找），英文品名去版本号 + 去重（全大写）覆盖「品名」，体积列求和覆盖「总体积」，FBA ID 去重供物流追踪表匹配，客户渠道取首个非空值供目的港映射。
@@ -74,7 +95,7 @@
 - 所有接口均接受 `customer`（客户标识，默认 `拓锐`），决定固定 shipper/consignee + 保函页眉/TO/FROM 等；未知客户回退拓锐。
 - `POST /api/bl/extract`（`file=` PDF，可选 `packing=` xlsx、`tracking=` xlsx、`customer=`）—— 单票
   - 响应：`{ ok, record, bl_fields, bl_header, telex_fields, warning }`
-- `POST /api/bl/extract-batch`（`folder_{i}` / `pdf_{i}_{j}` / `packing_{i}` / `weekly_packing` / `tracking` / `customer`）—— 批量
+- `POST /api/bl/extract-batch`（`folder_{i}` / `pdf_{i}_{j}` / `packing_{i}` / `weekly_packing` / `tracking` / `order_list`（星速）/ `customer`）—— 批量
   - 响应：`{ ok, tickets:[{folder, record, warning}], bl_fields, bl_header, telex_fields }`
   - `warning`：箱货清单/物流追踪表解析失败的非阻断提示；保函「运输工具」为空（非海运单 `@` 占位符）提示手工填写（等于船名航次）；**箱数/国家不一致**（底单 vs 箱货清单 vs 文件夹名）提示核对原底单/箱货清单
 - `POST /api/bl/generate`（`{ customer, tickets:[{folder, record}] }`）

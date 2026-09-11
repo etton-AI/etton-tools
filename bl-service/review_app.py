@@ -228,6 +228,9 @@ def api_extract_batch():
     if not tickets:
         return jsonify({"ok": False, "error": "未收到任何票的报关底单"}), 400
 
+    customer = (request.form.get("customer") or core.DEFAULT_CUSTOMER).strip()
+    is_xs = (customer == "星速")
+
     # 2. 物流追踪表：解析一次，全局共享（{FBA ID: {etd, eta, vessel}}）
     track_map = {}
     if "tracking" in request.files:
@@ -240,20 +243,35 @@ def api_extract_batch():
             except Exception:
                 track_map = {}
 
-    # 2b. 周汇总箱货清单：解析一次，全局共享（按工作号分组，供逐票匹配）
+    # 2b. 周汇总箱货清单：解析一次，全局共享（拓锐按工作号分组；星速按基础 FBA 分组）
     weekly_groups = []
+    xs_packing = {}
     if "weekly_packing" in request.files:
         wf = request.files["weekly_packing"]
         if wf and wf.filename:
             w_path = os.path.join(UPLOAD, f"weekly_{datetime.now().strftime('%Y%m%d%H%M%S%f')}.xlsx")
             wf.save(w_path)
             try:
-                weekly_groups = core.parse_packing_list_weekly(w_path)
+                if is_xs:
+                    xs_packing = core.parse_packing_list_xs(w_path)
+                else:
+                    weekly_groups = core.parse_packing_list_weekly(w_path)
             except Exception:
                 weekly_groups = []
 
+    # 2c. 星速订单列表：发往国家 / 开船时间 / 业务类型 / 船名航次（全局一份，按 FBA 匹配）
+    order_map = {}
+    if is_xs and "order_list" in request.files:
+        of = request.files["order_list"]
+        if of and of.filename:
+            o_path = os.path.join(UPLOAD, f"order_{datetime.now().strftime('%Y%m%d%H%M%S%f')}.xlsx")
+            of.save(o_path)
+            try:
+                order_map = core.parse_order_list(o_path)
+            except Exception:
+                order_map = {}
+
     # 3. 逐票处理
-    customer = (request.form.get("customer") or core.DEFAULT_CUSTOMER).strip()
     out_tickets = []
     for idx in sorted(tickets):
         t = tickets[idx]
@@ -287,65 +305,81 @@ def api_extract_batch():
         # 「文件命名」= 上传文件夹名（ZIP 内底单/提单/保函的文件名均由该文件夹名派生，而非提单号）
         rec["文件命名"] = folder
 
-        # 箱货清单：优先周汇总匹配，匹配不到回退每票单票清单
         warning = None
-        fba_ids = []
-        channel = None
-        packing_meta = None
-        if weekly_groups:
-            wm = core.match_weekly_packing(rec, weekly_groups)
-            if wm:
-                packing_meta = wm
-                if wm.get("products_en"):
-                    rec["品名"] = "\n".join(wm["products_en"])
-                if wm.get("total_volume"):
-                    rec["总体积"] = str(wm["total_volume"])
-                if wm.get("so_numbers"):
-                    rec["系统SO"] = "\n".join(wm["so_numbers"])
-                fba_ids = wm.get("fba_ids", [])
-                channel = wm.get("channel")
-        if packing_meta is None and t["packing"] and t["packing"].filename:
-            p_saved = os.path.join(UPLOAD, f"packing_{idx}_{stamp}.xlsx")
-            t["packing"].save(p_saved)
-            try:
-                pl = core.parse_packing_list(p_saved)
-                packing_meta = pl
-                if pl.get("products_en"):
-                    rec["品名"] = "\n".join(pl["products_en"])
-                if pl.get("total_volume"):
-                    rec["总体积"] = str(pl["total_volume"])
-                if pl.get("so_numbers"):
-                    rec["系统SO"] = "\n".join(pl["so_numbers"])
-                fba_ids = pl.get("fba_ids", [])
-                channel = pl.get("channel")
-            except Exception as e:
-                warning = f"箱货清单解析失败：{e}"
+        if is_xs:
+            # 星速：按文件夹名全部 FBA 匹配箱货清单（品名去重合并）+ 订单列表（体积/起运日期/目的港/起运地/船名航次）
+            core.xs_apply_packing(rec, folder, xs_packing, order_map)
+            if not (rec.get("起运日期") or "").strip():
+                warning = "起运日期为空（订单列表未匹配到开船时间），请手工填写"
+            if not (rec.get("目的港") or "").strip():
+                msg = "目的港为空（发往国家未匹配映射），请手工填写英文目的港"
+                warning = f"{warning}；{msg}" if warning else msg
+        else:
+            # 箱货清单：优先周汇总匹配，匹配不到回退每票单票清单
+            fba_ids = []
+            channel = None
+            packing_meta = None
+            if weekly_groups:
+                wm = core.match_weekly_packing(rec, weekly_groups)
+                if wm:
+                    packing_meta = wm
+                    if wm.get("products_en"):
+                        rec["品名"] = "\n".join(wm["products_en"])
+                    if wm.get("total_volume"):
+                        rec["总体积"] = str(wm["total_volume"])
+                    if wm.get("so_numbers"):
+                        rec["系统SO"] = "\n".join(wm["so_numbers"])
+                    fba_ids = wm.get("fba_ids", [])
+                    channel = wm.get("channel")
+            if packing_meta is None and t["packing"] and t["packing"].filename:
+                p_saved = os.path.join(UPLOAD, f"packing_{idx}_{stamp}.xlsx")
+                t["packing"].save(p_saved)
+                try:
+                    pl = core.parse_packing_list(p_saved)
+                    packing_meta = pl
+                    if pl.get("products_en"):
+                        rec["品名"] = "\n".join(pl["products_en"])
+                    if pl.get("total_volume"):
+                        rec["总体积"] = str(pl["total_volume"])
+                    if pl.get("so_numbers"):
+                        rec["系统SO"] = "\n".join(pl["so_numbers"])
+                    fba_ids = pl.get("fba_ids", [])
+                    channel = pl.get("channel")
+                except Exception as e:
+                    warning = f"箱货清单解析失败：{e}"
 
-        # 物流追踪表：按 FBA ID 匹配 ETD/ETA/船名航次
-        for fid in fba_ids:
-            if fid in track_map:
-                info = track_map[fid]
-                if info.get("etd"):
-                    rec["起运日期"] = info["etd"]
-                if info.get("vessel") and not (rec.get("船名航次") or "").strip():
-                    rec["船名航次"] = info["vessel"]
-                arrival = core._arrival_date(info.get("etd"), info.get("eta"), express=core._is_express(channel, rec.get("运输方式")))
-                if arrival:
-                    rec["申请日期"] = core._date_cn(arrival)
-                break
+            # 物流追踪表：按 FBA ID 匹配 ETD/ETA/船名航次
+            for fid in fba_ids:
+                if fid in track_map:
+                    info = track_map[fid]
+                    if info.get("etd"):
+                        rec["起运日期"] = info["etd"]
+                    if info.get("vessel") and not (rec.get("船名航次") or "").strip():
+                        rec["船名航次"] = info["vessel"]
+                    arrival = core._arrival_date(info.get("etd"), info.get("eta"), express=core._is_express(channel, rec.get("运输方式")))
+                    if arrival:
+                        rec["申请日期"] = core._date_cn(arrival)
+                    break
 
-        # 港口/渠道映射（渠道大类 + 运输方式 + 运抵国）
-        core.apply_port_map(rec, channel)
-        core.apply_channel_map(rec, channel)
+            # 港口/渠道映射（渠道大类 + 运输方式 + 运抵国）
+            core.apply_port_map(rec, channel)
+            core.apply_channel_map(rec, channel)
 
-        # 保函「运输工具」为空提醒
-        if not (rec.get("运输工具") or "").strip():
-            msg = "运输工具为空，请手工填写（等于船名航次）"
+            # 保函「运输工具」为空提醒
+            if not (rec.get("运输工具") or "").strip():
+                msg = "运输工具为空，请手工填写（等于船名航次）"
+                warning = f"{warning}；{msg}" if warning else msg
+
+            # 国家/箱数一致性校验（底单 vs 箱货清单 vs 文件夹名）
+            for w in core.validate_ticket(folder, rec, packing_meta):
+                warning = f"{warning}；{w}" if warning else w
+
+        # 非海运（陆运/卡航/铁路/空运）无海运集装箱，柜号无需填写——两客户通用提示，避免把柜号留空误当成漏提取
+        mode = (rec.get("运输方式") or "").strip()
+        if mode and "水" not in mode:
+            label = {"公路运输": "陆运/卡航", "铁路运输": "铁路", "航空运输": "空运"}.get(mode, "非海运")
+            msg = f"本票为{label}运输，无需填写柜号（柜号仅海运提单需要）"
             warning = f"{warning}；{msg}" if warning else msg
-
-        # 国家/箱数一致性校验（底单 vs 箱货清单 vs 文件夹名）
-        for w in core.validate_ticket(folder, rec, packing_meta):
-            warning = f"{warning}；{w}" if warning else w
 
         out_tickets.append({"folder": folder, "record": rec, "warning": warning})
 
@@ -379,10 +413,11 @@ def api_generate():
     if not tickets:
         return jsonify({"ok": False, "error": "无数据"}), 400
 
-    # 记忆回写：中文港口 → 英文；带渠道的票改目的港后记入 channel_map
+    # 记忆回写：中文港口 → 英文；带渠道的票改目的港后记入 channel_map（星速走 xs_dest_map，不参与）
     records = [t["record"] for t in tickets]
-    core.remember_ports(records)
-    core.remember_channels(records)
+    if customer != "星速":
+        core.remember_ports(records)
+        core.remember_channels(records)
 
     # 补充每票的合并底单路径（按文件夹名重建）
     for t in tickets:
@@ -397,12 +432,12 @@ def api_generate():
 
     # 返回 ZIP 下载相对路径 + 每票预览相对路径（前端经 /api/bl/file/<rel> 访问）
     def _rel(p):
-        return os.path.relpath(p, OUT).replace("\\", "/")
+        return os.path.relpath(p, OUT).replace("\\", "/") if p else ""
 
     previews = [{
         "folder": r["folder"],
         "bl": _rel(r["bl_pdf"]),
-        "telex": _rel(r["telex_preview_pdf"]),
+        "telex": _rel(r.get("telex_preview_pdf", "")),
     } for r in results]
 
     return jsonify({"ok": True, "zip": _rel(zip_path), "previews": previews})

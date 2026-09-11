@@ -32,6 +32,20 @@ CUSTOMERS = {
         "telex_to": "Guangzhou Tuorui Technology Co. ,Ltd",
         "telex_from": "ETTON TECHNOLOGY LOGISTICS (ZHONGSHAN) CO., LTD",
     },
+    "星速": {
+        "label": "星速（HNXS）",
+        # 星速为 Amazon FBA 直发：收货人固定 Amazon，通知方 = 同收货人；
+        # 发货人可变（境内发货人 → 拼音大写）；无需电放保函（no_telex）。
+        "shipper_bl": None,  # None = 可变发货人（境内发货人拼音），extract 里单独处理
+        "consignee_bl": "AMAZONFULFILMENTCENTER",
+        "notify_bl": "SAMEASCONSIGNEE",
+        "shipper_telex": "",
+        "consignee_telex": "",
+        "telex_header": "",
+        "telex_to": "",
+        "telex_from": "",
+        "no_telex": True,
+    },
 }
 DEFAULT_CUSTOMER = "拓锐"
 
@@ -44,6 +58,60 @@ def get_customer_config(customer):
 def list_customers():
     """返回客户列表 [{key, label}]，供前端下拉渲染（加客户只改 CUSTOMERS 一处）。"""
     return [{"key": k, "label": v["label"]} for k, v in CUSTOMERS.items()]
+
+
+def _cn_to_pinyin_upper(name):
+    """中文公司名 → 拼音大写无空格（星速提单 shipper 格式）。
+
+    例：湖南永高商贸有限公司 → HUNANYONGGAOSHANGMAOYOUXIANGONGSI。
+    含括号（如公司名带 (9143...) 统一社会信用代码）时先去括号内容；pypinyin 不可用则原样返回。
+    """
+    name = re.sub(r"[\(（][^)）]*[\)）]", "", (name or "").strip())
+    if not name:
+        return ""
+    try:
+        from pypinyin import lazy_pinyin
+        return "".join(lazy_pinyin(name)).upper()
+    except Exception:
+        return name.upper()
+
+
+def _base_fba(fid):
+    """箱货清单 FBA ID → 基础 FBA（12 位 FBA+9 位，去「U+6位序列号」后缀）。
+
+    例：FBA15LHBVDHZU000001 → FBA15LHBVDHZ；FBA15L9QBCCTU000001 → FBA15L9QBCCT。
+    底单/订单列表里的 FBA 就是 12 位基础 FBA，两边一致即可匹配。
+    """
+    fid = (fid or "").strip()
+    m = re.match(r"^(FBA\d{2}[0-9A-Z]{7})", fid)
+    return m.group(1) if m else fid
+
+
+def _fba_from_text(text):
+    """从任意文本里提取基础 FBA（如 合同协议号 FBA15LHCTRGN+HCXX5P → FBA15LHCTRGN）。"""
+    m = re.search(r"FBA\d{2}[0-9A-Z]{7}", text or "")
+    return m.group(0) if m else ""
+
+
+def _fbas_from_text(text):
+    """提取文本里的全部基础 FBA（含 '+6位后缀' 缩写，如 FBA15M0WQDJZ+0S50DJ → [FBA15M0WQDJZ, FBA15M0S50DJ]）。
+
+    底单文件名里的多 FBA 有两种写法：逗号分隔完整 FBA（FBA15LZW7KR4,FBA15M03GFHD），
+    或 '+6位后缀' 缩写（FBA15M0WQDJZ+0S50DJ，第二个 FBA 与前一个共享前 6 位 FBA15M）。
+    """
+    found = []
+    text = text or ""
+    for m in re.finditer(r"FBA\d{2}[0-9A-Z]{7}", text):
+        base = m.group(0)
+        if base not in found:
+            found.append(base)
+        # '+6位后缀'：第二个 FBA 与前一个共享前 6 位（如 FBA15M），还原为完整 FBA
+        m2 = re.match(r"\+([0-9A-Z]{6})", text[m.end():])
+        if m2:
+            full = base[:6] + m2.group(1)
+            if full not in found:
+                found.append(full)
+    return found
 
 # 中文品名 -> 英文品名（来自箱货清单，可扩展）
 PRODUCT_EN_MAP = {
@@ -314,6 +382,300 @@ def remember_channels(records):
     return changed
 
 
+# ---------- 星速（HNXS）专用：目的港 / 起运港 / 订单列表 / 箱货清单 ----------
+# 星速为 Amazon FBA 直发，无需电放保函（shipper=境内发货人拼音，
+# consignee 固定 Amazon，通知方=同收货人）。提单与拓锐共用同一 ETTON 邮件合并模板。
+# 目的港按「发往国家 + 运输方式（海运/陆运）」映射。
+XS_DEST_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "xs_dest_map.json")
+
+# 默认目的港映射（可随使用自动积累）：陆运取国家英文名，海运取实际港口
+XS_DEST_MAP_DEFAULT = {
+    "海运": {"英国": "FELIXSTOWE", "德国": "ROTTERDAM,NL", "法国": "ROTTERDAM,NL", "荷兰": "ROTTERDAM,NL"},
+    "陆运": {"英国": "BRITAIN", "德国": "GERMANY", "法国": "FRANCE", "荷兰": "NETHERLANDS"},
+}
+
+
+def load_xs_dest_map():
+    """读取星速目的港映射 {海运: {国家: 港口}, 陆运: {国家: 港口}}。缺失时回退默认值。"""
+    data = None
+    try:
+        with open(XS_DEST_MAP_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        data = None
+    if not isinstance(data, dict):
+        data = dict(XS_DEST_MAP_DEFAULT)
+    for key in ("海运", "陆运"):
+        data.setdefault(key, dict(XS_DEST_MAP_DEFAULT.get(key, {})))
+    return data
+
+
+def save_xs_dest_map(dm):
+    """保存星速目的港映射到 xs_dest_map.json。"""
+    try:
+        with open(XS_DEST_MAP_PATH, "w", encoding="utf-8") as f:
+            json.dump(dm, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+def apply_xs_map(rec, order_info):
+    """星速提单字段映射：起运港（海运→离境口岸查 port_map.origin，其余→SHENZHEN）、
+    目的港（发往国家 + 运输方式查 xs_dest_map；加拿大美转加按供应渠道分 LONGBEACH/LOSANGELES）、
+    起运日期（订单列表开船时间）、海运船名航次（船名/船次）。
+    order_info 为订单列表匹配到的 {country, ship_time, vessel, voyage, biz_type, supply, channel}。
+    """
+    order_info = order_info or {}
+    mode = (rec.get("运输方式") or "").strip()
+    biz = (order_info.get("biz_type") or "").strip()
+    is_sea = "水" in mode or biz == "海运"
+
+    # 起运地：海运取「离境口岸」（extract 已把离境口岸存进 rec['起运地']）→ port_map.origin；
+    #        非海运（卡航/铁路/公路）固定 SHENZHEN。
+    pm = load_port_map()
+    origins = pm.get("origin", {}) or {}
+    cn_port = (rec.get("起运地") or "").strip()
+    rec["_起运地_原始"] = cn_port
+    if is_sea:
+        if cn_port and cn_port in origins:
+            rec["起运地"] = origins[cn_port]
+        # 海运但离境口岸无对照 → 保留中文供人工填
+    else:
+        rec["起运地"] = "SHENZHEN"
+
+    # 目的港
+    country = (order_info.get("country") or "").strip() or (rec.get("运抵国") or "").strip()
+    rec["_目的港_原始"] = country
+    supply = (order_info.get("supply") or "").strip() or (order_info.get("channel") or "").strip()
+    dest = None
+    if "加拿大" in country:
+        # 美转加（经美中转）：带美森/CLX → LONGBEACH,CA；非美森 → LOSANGELES,CA。
+        # 直航加拿大（加东/加西普船）目的港是加拿大本土港口，留空人工填。
+        if "美转加" in supply:
+            dest = "LONGBEACH,CA" if ("美森" in supply or "CLX" in supply.upper()) else "LOSANGELES,CA"
+    elif country:
+        dm = load_xs_dest_map()
+        dest = dm.get("海运" if is_sea else "陆运", {}).get(country)
+    if dest:
+        rec["目的港"] = dest
+        rec["目的地"] = dest
+
+    # 星速提单「起运日期」= 订单列表「开船时间」（非报关单申报日期），空则留空人工填
+    ship_time = (order_info.get("ship_time") or "").strip()
+    rec["起运日期"] = ship_time
+
+    # 海运船名航次：订单列表船名/船次优先，缺省保留报关单提取的运输工具
+    if is_sea and not (rec.get("船名航次") or "").strip():
+        vessel = (order_info.get("vessel") or "").strip()
+        voyage = (order_info.get("voyage") or "").strip()
+        if vessel:
+            rec["船名航次"] = f"{vessel}/{voyage}" if voyage else vessel
+    return rec
+
+
+def xs_apply_packing(rec, folder, xs_packing, order_map):
+    """星速：按文件夹名里的全部 FBA 匹配箱货清单 + 订单列表，回填提单字段。
+
+    - 品名：箱货清单英文品名，跨全部 FBA 去重合并（提单每个品名一行）
+    - 总体积：订单列表「总CBM」，按唯一订单行（系统SO 去重）求和（'FBA15M0WQDJZ+0S50DJ' 为两单合并）
+    - 系统SO：跨全部 FBA 去重
+    - 其余（发往国家/开船时间/供应渠道/船名航次/起运地/目的港）由 apply_xs_map 用首个匹配订单行映射
+    """
+    fbas = _fbas_from_text(folder)
+    if not fbas:
+        f = (rec.get("FBA") or "").strip()
+        if f:
+            fbas = [f]
+
+    products = []
+    sos = []
+    seen_orders = {}  # 系统SO -> order_info（体积按唯一订单行求和，避免逗号多 FBA 同一行重复累加）
+    order_info = {}
+    for fba in fbas:
+        pk = xs_packing.get(fba)
+        if pk:
+            for p in pk.get("products_en", []):
+                if p and p not in products:
+                    products.append(p)
+            if pk.get("so") and pk["so"] not in sos:
+                sos.append(pk["so"])
+        oi = order_map.get(fba)
+        if oi:
+            if not order_info:
+                order_info = oi
+            so = (oi.get("so") or "").strip() or fba
+            if so not in seen_orders:
+                seen_orders[so] = oi
+
+    if products:
+        rec["品名"] = "\n".join(products)
+    if sos:
+        rec["系统SO"] = "\n".join(sos)
+
+    # 总体积：订单列表「总CBM」按唯一订单行求和
+    cbm_sum = 0.0
+    has_cbm = False
+    for oi in seen_orders.values():
+        c = oi.get("cbm")
+        if isinstance(c, (int, float)):
+            cbm_sum += float(c)
+            has_cbm = True
+    if has_cbm:
+        rec["总体积"] = str(round(cbm_sum, 4))
+
+    apply_xs_map(rec, order_info)
+    return rec
+
+
+def parse_order_list(xlsx_path):
+    """解析星速「订单列表」xlsx，返回 {基础 FBA: {country, ship_time, vessel, voyage, biz_type, so, supply, channel, cbm, kg, boxes}}。
+
+    表头按文字定位列：发往国家 / 开船时间 / 船名 / 船次 / 业务类型 / 系统SO / 供应渠道 / 客户渠道 / 总CBM / 总KG / 总箱数 / FBA。
+    FBA 列可能一个订单含多个 FBA（逗号/换行分隔），逐个拆分映射到同一订单信息。
+    """
+    # 注意：订单列表用 read_only=False（该文件 read_only 模式会漏读数据行，仅返回表头）
+    wb = load_workbook(xlsx_path, data_only=True)
+    ws = wb.worksheets[0]
+    rows = list(ws.iter_rows(values_only=True))
+    wb.close()
+
+    # 表头文字 -> info 键（用「文字→键」映射避免逐个 if 分支）
+    _WANT = {
+        "FBA": "fba", "发往国家": "country", "开船时间": "ship_time", "船名": "vessel",
+        "船次": "voyage", "业务类型": "biz_type", "系统SO": "so", "供应渠道": "supply",
+        "客户渠道": "channel", "总CBM": "cbm", "总KG": "kg", "总箱数": "boxes",
+    }
+    cols = {}
+    header_idx = None
+    for i, row in enumerate(rows[:5]):
+        if not row:
+            continue
+        for j, v in enumerate(row):
+            s = str(v).strip() if v is not None else ""
+            if s in _WANT and _WANT[s] not in cols:
+                cols[_WANT[s]] = j
+        if "fba" in cols and header_idx is None:
+            header_idx = i
+    if "fba" not in cols:
+        return {}
+
+    fba_col = cols["fba"]
+
+    def _g(row, key):
+        c = cols.get(key)
+        return str(row[c]).strip() if c is not None and c < len(row) and row[c] else ""
+
+    def _num(row, key):
+        c = cols.get(key)
+        if c is None or c >= len(row) or row[c] is None:
+            return ""
+        return float(row[c]) if isinstance(row[c], (int, float)) else ""
+
+    index = {}
+    for row in rows[(header_idx + 1):]:
+        if not row or fba_col >= len(row) or not row[fba_col]:
+            continue
+        info = {
+            "country": _g(row, "country"),
+            "ship_time": _excel_date_str(row[cols["ship_time"]]) if "ship_time" in cols and cols["ship_time"] < len(row) and row[cols["ship_time"]] else "",
+            "vessel": _g(row, "vessel"),
+            "voyage": _g(row, "voyage"),
+            "biz_type": _g(row, "biz_type"),
+            "so": _g(row, "so"),
+            "supply": _g(row, "supply"),
+            "channel": _g(row, "channel"),
+            "cbm": _num(row, "cbm"),
+            "kg": _num(row, "kg"),
+            "boxes": _num(row, "boxes"),
+        }
+        # 一个订单可能多 FBA（逗号/换行/分号分隔）
+        for fid in re.split(r"[,\n，、;；]+", str(row[fba_col])):
+            fid = _base_fba(fid)
+            if fid:
+                index.setdefault(fid, info)
+    return index
+
+
+def parse_packing_list_xs(xlsx_path):
+    """解析星速「箱货清单」xlsx，按基础 FBA 分组，返回 {基础FBA: 汇总}。
+
+    每项：products_en(去重英文品名), total_volume(长×宽×高×箱数求和, CBM),
+          total_weight(货箱重量求和), boxes(总箱数求和), country, channel, so。
+    星速箱货清单无「体积」列，由 长(CM)×宽(CM)×高(CM)×总箱数 折算。
+    """
+    wb = load_workbook(xlsx_path, data_only=True, read_only=True)
+    ws = wb.worksheets[0]
+    rows = list(ws.iter_rows(values_only=True))
+    wb.close()
+
+    fba_col = en_col = wt_col = box_col = None
+    len_col = wid_col = hei_col = country_col = channel_col = so_col = None
+    header_idx = None
+    for i, row in enumerate(rows[:12]):
+        if not row:
+            continue
+        for j, v in enumerate(row):
+            s = str(v).strip() if v is not None else ""
+            if s == "FBA ID":
+                fba_col = j
+                header_idx = i
+            elif s == "英文品名":
+                en_col = j
+            elif s == "货箱重量":
+                wt_col = j
+            elif s == "总箱数(CTN)":
+                box_col = j
+            elif s == "长(CM)":
+                len_col = j
+            elif s == "宽(CM)":
+                wid_col = j
+            elif s == "高(CM)":
+                hei_col = j
+            elif s in ("国家", "目的国"):
+                country_col = j
+            elif s == "客户渠道":
+                channel_col = j
+            elif s == "系统SO":
+                so_col = j
+
+    groups = {}
+    for i, row in enumerate(rows):
+        if not row:
+            continue
+        if header_idx is not None and i <= header_idx:
+            continue
+        if fba_col is None or fba_col >= len(row) or not row[fba_col]:
+            continue
+        base = _base_fba(str(row[fba_col]))
+        if not base:
+            continue
+        g = groups.setdefault(base, {
+            "products_en": [], "total_volume": 0.0, "total_weight": 0.0,
+            "boxes": 0, "country": None, "channel": None, "so": None,
+        })
+        if so_col is not None and so_col < len(row) and row[so_col] and g["so"] is None:
+            g["so"] = str(row[so_col]).strip()
+        if country_col is not None and country_col < len(row) and row[country_col] and g["country"] is None:
+            g["country"] = str(row[country_col]).strip()
+        if channel_col is not None and channel_col < len(row) and row[channel_col] and g["channel"] is None:
+            g["channel"] = str(row[channel_col]).strip()
+        if en_col is not None and en_col < len(row) and row[en_col]:
+            e = _strip_version(str(row[en_col])).upper().replace(" ", "")
+            if e and e not in g["products_en"]:
+                g["products_en"].append(e)
+        if wt_col is not None and wt_col < len(row) and isinstance(row[wt_col], (int, float)):
+            g["total_weight"] += float(row[wt_col])
+        if box_col is not None and box_col < len(row) and isinstance(row[box_col], (int, float)):
+            g["boxes"] += int(row[box_col])
+        # 体积：长×宽×高×箱数 / 1e6（星速箱货清单无「体积」列）
+        if None not in (len_col, wid_col, hei_col) and max(len_col, wid_col, hei_col) < len(row):
+            L, W, H = row[len_col], row[wid_col], row[hei_col]
+            B = row[box_col] if box_col is not None and box_col < len(row) and isinstance(row[box_col], (int, float)) else 1
+            if all(isinstance(x, (int, float)) for x in (L, W, H)):
+                g["total_volume"] += float(L) * float(W) * float(H) * float(B) / 1e6
+    return groups
+
+
 # ---------- 1. 报关单字段提取（标签定位版，适配横向 842x595 报关单） ----------
 # 报关底单页面的关键标签（用于判断某页/某 PDF 是否是报关底单，跳过「委托报关协议」等非底单）
 _BL_KEY_LABELS = ("境内发货人", "境外收货人", "提运单号", "件数", "毛重", "离境口岸", "指运港", "运抵国")
@@ -399,14 +761,25 @@ def extract_customs_data(pdf_path, customer=DEFAULT_CUSTOMER):
     def _row_text(ws):
         return " ".join(w["text"] for w in ws)
 
-    def _value_row(label, dy_min=4, dy_max=20):
-        """定位含 label 的标签行，返回其下方第一行的 words（值行）。找不到返回 []。"""
+    def _value_row(label, dy_min=4, dy_max=20, merge_gap=4):
+        """定位含 label 的标签行，返回其下方值行的 words。
+
+        值行可能被 pdfplumber 拆成相邻两行（如公司名 y=101 / 关区名 y=100，基线差 1pt），
+        若只取第一行，_leftmost(x0<250) 会漏掉左侧公司名（取到右侧关区名 x0>250 被丢弃）。
+        故把 dy 范围内、与首个值行 y 间距 ≤ merge_gap 的相邻行合并返回。
+        """
         for y in ys:
             if label in _row_text(lines[y]):
+                merged = []
+                first_y = None
                 for y2 in ys:
                     if dy_min < y2 - y <= dy_max:
-                        return lines[y2]
-                return []
+                        if first_y is None:
+                            first_y = y2
+                        elif y2 - first_y > merge_gap:
+                            break
+                        merged.extend(lines[y2])
+                return merged
         return []
 
     def _leftmost(ws, x_cut=250):
@@ -516,8 +889,16 @@ def extract_customs_data(pdf_path, customer=DEFAULT_CUSTOMER):
 
     # 客户固定 shipper/consignee（英文），覆盖提取出的中文/英文名
     cfg = get_customer_config(customer)
-    data["shipper"] = cfg["shipper_bl"]
+    if cfg.get("shipper_bl"):
+        data["shipper"] = cfg["shipper_bl"]
+    else:
+        # 可变发货人（星速 Amazon FBA 直发）：境内发货人中文名 → 拼音大写
+        data["shipper"] = _cn_to_pinyin_upper(data.get("shipper", ""))
     data["consignee"] = cfg["consignee_bl"]
+
+    # 星速：合同协议号 = 基础 FBA（用于匹配订单列表 / 箱货清单），文件名兜底在调用方
+    if customer == "星速":
+        data["FBA"] = _fba_from_text(full_text)
 
     # 保函字段
     data["申请单位"] = cfg["shipper_telex"]
@@ -1145,19 +1526,28 @@ def generate_batch(tickets, bl_template, out_dir, customer=DEFAULT_CUSTOMER, roo
     preview_dir = os.path.join(out_dir, "preview")
     os.makedirs(preview_dir, exist_ok=True)
 
+    no_telex = bool(get_customer_config(customer).get("no_telex"))
+    is_xs = (customer == "星速")
+
     results = []
     for i, t in enumerate(tickets):
         rec = t["record"]
         folder = t.get("folder") or rec.get("提单号") or f"提单_{i+1}"
 
-        bl_name = derive_output_name(folder, "提单")
-        telex_name = derive_output_name(folder, "电放保函")
-        ddan_name = derive_output_name(folder, "底单")
+        # 星速命名对齐历史提单：FBA15XXX-公司-件数-提单.pdf / -底单.pdf
+        if is_xs:
+            bl_name = f"{folder}-提单"
+            telex_name = ""
+            ddan_name = f"{folder}-底单"
+        else:
+            bl_name = derive_output_name(folder, "提单")
+            telex_name = derive_output_name(folder, "电放保函")
+            ddan_name = derive_output_name(folder, "底单")
         safe_bl = re.sub(r'[\\/:*?"<>|]', "_", bl_name) or "提单"
         safe_telex = re.sub(r'[\\/:*?"<>|]', "_", telex_name) or "电放保函"
         safe_ddan = re.sub(r'[\\/:*?"<>|]', "_", ddan_name) or "底单"
 
-        # 提单：docx 临时 -> PDF（仅保留 PDF）
+        # 提单：docx 临时 -> PDF（仅保留 PDF）。所有客户统一走 ETTON 邮件合并模板（星速同样套用拓锐模板）。
         bl_docx_tmp = os.path.join(tempfile.gettempdir(), f"{safe_bl}_{i}.docx")
         bl_pdf = os.path.join(out_dir, f"{safe_bl}.pdf")
         fill_bl_docx(bl_template, bl_docx_tmp, rec)
@@ -1167,16 +1557,19 @@ def generate_batch(tickets, bl_template, out_dir, customer=DEFAULT_CUSTOMER, roo
         except OSError:
             pass
 
-        # 电放保函：docx（ZIP 用）+ 预览 PDF（不进 ZIP）
-        telex_docx = os.path.join(out_dir, f"{safe_telex}.docx")
-        fill_telex_docx(telex_docx, rec, customer)
-        telex_preview_pdf = os.path.join(preview_dir, f"{safe_telex}.pdf")
-        docx_to_pdf(telex_docx, telex_preview_pdf)
+        # 电放保函：docx（ZIP 用）+ 预览 PDF（不进 ZIP）。星速（Amazon FBA 直发）无需保函，跳过。
+        telex_docx = ""
+        telex_preview_pdf = ""
+        if not no_telex:
+            telex_docx = os.path.join(out_dir, f"{safe_telex}.docx")
+            fill_telex_docx(telex_docx, rec, customer)
+            telex_preview_pdf = os.path.join(preview_dir, f"{safe_telex}.pdf")
+            docx_to_pdf(telex_docx, telex_preview_pdf)
 
-        # 底单：合并 PDF 复制改名
+        # 底单：合并 PDF 复制改名（星速 ZIP 不含底单，跳过复制）
         ddan_pdf = os.path.join(out_dir, f"{safe_ddan}.pdf")
         merged = t.get("merged_pdf")
-        if merged and os.path.exists(merged):
+        if not is_xs and merged and os.path.exists(merged):
             shutil.copy(merged, ddan_pdf)
 
         results.append({
@@ -1188,19 +1581,26 @@ def generate_batch(tickets, bl_template, out_dir, customer=DEFAULT_CUSTOMER, roo
             "bl_name": safe_bl, "telex_name": safe_telex, "ddan_name": safe_ddan,
         })
 
-    # 打包 ZIP：按票建子文件夹（= 原上传文件夹名），每票含底单.pdf + 提单.pdf + 保函.docx 三份
+    # 打包 ZIP：拓锐按票建子文件夹（底单+提单+保函）；星速所有提单平铺根目录（不建子文件夹、不含底单）
     stamp = datetime.now().strftime("%Y%m%d%H%M%S")
     safe_root = re.sub(r'[\\/:*?"<>|]', "_", (root_folder or "").strip())
-    zip_name = f"{safe_root}系统制作文件.zip" if safe_root else f"ETTON提单_电放保函_{stamp}.zip"
+    zip_name = f"{safe_root}系统制作文件.zip" if safe_root else (f"ETTON提单_{stamp}.zip" if is_xs else f"ETTON提单_电放保函_{stamp}.zip")
     zip_path = os.path.join(out_dir, zip_name)
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for j, r in enumerate(results):
-            safe_folder = (re.sub(r'[\\/:*?"<>|]', "_", str(r.get("folder") or "")).strip()
-                           or f"票_{j + 1}")
-            # 顺序对齐用户预期：底单、提单、保函（底单缺失则跳过，不阻断）
-            for src in (r["ddan_pdf"], r["bl_pdf"], r["telex_docx"]):
-                if os.path.isfile(src):
-                    zf.write(src, arcname=f"{safe_folder}/{os.path.basename(src)}")
+        if is_xs:
+            # 星速：所有提单平铺根目录（命名 = 底单名前缀 + 「-提单」，见 bl_name）
+            for r in results:
+                src = r["bl_pdf"]
+                if src and os.path.isfile(src):
+                    zf.write(src, arcname=os.path.basename(src))
+        else:
+            for j, r in enumerate(results):
+                safe_folder = (re.sub(r'[\\/:*?"<>|]', "_", str(r.get("folder") or "")).strip()
+                               or f"票_{j + 1}")
+                # 顺序对齐用户预期：底单、提单、保函（底单缺失则跳过，不阻断）
+                for src in (r["ddan_pdf"], r["bl_pdf"], r["telex_docx"]):
+                    if src and os.path.isfile(src):
+                        zf.write(src, arcname=f"{safe_folder}/{os.path.basename(src)}")
     return zip_path, results
 
 
@@ -1630,7 +2030,9 @@ def _excel_date_str(v):
     if isinstance(v, (int, float)):
         return (datetime(1899, 12, 30) + timedelta(days=float(v))).strftime("%Y-%m-%d")
     s = str(v).strip()
-    return s
+    # 字符串日期可能带时间/小数（如 2026-07-03 00:00:00 / 2026-07-03 00:00:00.0）→ 只取日期
+    m = re.match(r"(\d{4}-\d{2}-\d{2})", s)
+    return m.group(1) if m else s
 
 
 def parse_tracking_list(xlsx_path):

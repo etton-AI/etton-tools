@@ -143,7 +143,12 @@ export default function BlReviewPage() {
   const [trackingDragging, setTrackingDragging] = useState(false);
   const [weeklyPackingFile, setWeeklyPackingFile] = useState<File | null>(null);
   const [weeklyDragging, setWeeklyDragging] = useState(false);
-  const [customer, setCustomer] = useState<string>("拓锐");
+  const [orderListFile, setOrderListFile] = useState<File | null>(null);
+  const [orderListDragging, setOrderListDragging] = useState(false);
+  const [customer, setCustomer] = useState<string>(() => {
+    if (typeof window === "undefined") return "拓锐";
+    return localStorage.getItem("bl_customer") || "拓锐";
+  });
   const [customers, setCustomers] = useState<CustomerOption[]>([
     { key: "拓锐", label: "拓锐（广州拓锐科技有限公司）" },
   ]);
@@ -161,6 +166,8 @@ export default function BlReviewPage() {
   const folderInputRef = useRef<HTMLInputElement>(null);
   const trackingInputRef = useRef<HTMLInputElement>(null);
   const weeklyInputRef = useRef<HTMLInputElement>(null);
+  const orderListInputRef = useRef<HTMLInputElement>(null);
+  const isXs = customer === "星速";
 
   // 页面加载时拉取客户列表（加客户只改后端 CUSTOMERS，前端下拉自动更新）
   useEffect(() => {
@@ -169,7 +176,8 @@ export default function BlReviewPage() {
       .then((d) => {
         if (d.ok && Array.isArray(d.customers) && d.customers.length) {
           setCustomers(d.customers);
-          if (d.default) setCustomer(d.default);
+          // 已持久化的客户优先；仅首次访问（无持久化）才回退到后端默认值
+          if (d.default && !localStorage.getItem("bl_customer")) setCustomer(d.default);
         }
       })
       .catch(() => {});
@@ -205,7 +213,16 @@ export default function BlReviewPage() {
     if (f) setWeeklyPackingFile(f);
   };
 
-  // 选择文件夹：按「直接父目录」分组，每个子文件夹 = 一票（底单 PDF 可多份 + 箱货清单 xlsx）
+  const handleOrderListSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    if (f) setOrderListFile(f);
+  };
+
+  // 星速：底单文件名去「-底单/-报关单/-放行单/-委托协议」后缀，得到票名（FBA15XXX-公司-件数）
+  const xsTicketBase = (name: string) =>
+    name.replace(/\.pdf$/i, "").replace(/[-\s_]*(底单|报关单|放行单|委托协议|委托报关|报|放|委托)$/i, "");
+
+  // 选择文件夹：拓锐按「直接父目录」分组（每子文件夹 = 一票）；星速按「FBA 底单文件名」分组（每 PDF = 一票）
   const handleFolderSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
@@ -214,15 +231,25 @@ export default function BlReviewPage() {
     setRootFolder(firstRel ? firstRel.split("/")[0] : "");
     const groups = new Map<string, FolderGroup>();
     for (const f of files) {
-      const parts = f.webkitRelativePath ? f.webkitRelativePath.split("/") : [f.name];
-      const folder = parts.length >= 2 ? parts[parts.length - 2] : f.name;
+      const name = f.name.toLowerCase();
+      const isPdf = name.endsWith(".pdf");
+      const isXlsx = name.endsWith(".xlsx") || name.endsWith(".xls");
+      let folder: string;
+      if (isXs) {
+        // 星速：每个底单 PDF = 一票；拆分底单（报关单/放行单/委托协议）按文件名去后缀归入同票
+        if (!isPdf) continue;
+        // 部分浏览器目录上传会把相对路径（如「7月底单/xxx.pdf」）塞进 name，这里统一取纯文件名
+        folder = xsTicketBase(f.name.split("/").pop() || f.name);
+      } else {
+        const parts = f.webkitRelativePath ? f.webkitRelativePath.split("/") : [f.name];
+        folder = parts.length >= 2 ? parts[parts.length - 2] : f.name;
+      }
       if (!groups.has(folder)) groups.set(folder, { folder, pdfs: [], packing: null });
       const g = groups.get(folder)!;
-      const name = f.name.toLowerCase();
-      if (name.endsWith(".pdf")) {
+      if (isPdf) {
         g.pdfs.push(f);
-      } else if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
-        // 优先把文件名含「箱/货/清单/packing」的 xlsx 识别为箱货清单
+      } else if (isXlsx && !isXs) {
+        // 优先把文件名含「箱/货/清单/packing」的 xlsx 识别为箱货清单（星速箱货清单走全局上传）
         if (!g.packing || /箱|货|清单|packing/i.test(f.name)) g.packing = f;
       }
     }
@@ -230,7 +257,7 @@ export default function BlReviewPage() {
     setFolderGroups(list);
     setError(null);
     setNotice(
-      `已识别 ${list.length} 票（文件夹），共 ${list.reduce((n, g) => n + g.pdfs.length, 0)} 份底单 PDF`,
+      `已识别 ${list.length} 票${isXs ? "（FBA）" : "（文件夹）"}，共 ${list.reduce((n, g) => n + g.pdfs.length, 0)} 份底单 PDF`,
     );
   };
 
@@ -239,6 +266,7 @@ export default function BlReviewPage() {
     setRootFolder("");
     setTrackingFile(null);
     setWeeklyPackingFile(null);
+    setOrderListFile(null);
     setTickets([]);
     setBlFields([]);
     setBlHeader({});
@@ -265,6 +293,7 @@ export default function BlReviewPage() {
       });
       if (trackingFile) form.append("tracking", trackingFile);
       if (weeklyPackingFile) form.append("weekly_packing", weeklyPackingFile);
+      if (orderListFile) form.append("order_list", orderListFile);
       form.append("customer", customer);
 
       const res = await fetch("/api/bl/extract-batch", { method: "POST", body: form });
@@ -343,7 +372,7 @@ export default function BlReviewPage() {
     }
   };
 
-  const columns = [...blFields, ...telexFields].filter((c) => c !== "文件命名");
+  const columns = [...blFields, ...(isXs ? [] : telexFields)].filter((c) => c !== "文件命名");
   const hasResult = tickets.length > 0;
   const generated = zipUrl != null;
 
@@ -354,7 +383,7 @@ export default function BlReviewPage() {
         <div>
           <h1 className="text-2xl font-bold text-deep">📦 提单 + 电放保函（批量）</h1>
           <p className="mt-1 text-sm text-zinc-500">
-            按文件夹批量上传 → 自动提取 → <span className="font-semibold text-primary">人工审核</span> → 生成提单 & 电放保函
+            按文件夹批量上传 → 自动提取 → <span className="font-semibold text-primary">人工审核</span> → 生成提单{isXs ? "" : " & 电放保函"}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -386,7 +415,11 @@ export default function BlReviewPage() {
             <select
               id="customer"
               value={customer}
-              onChange={(e) => setCustomer(e.target.value)}
+              onChange={(e) => {
+                const v = e.target.value;
+                setCustomer(v);
+                localStorage.setItem("bl_customer", v);
+              }}
               className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-700 focus:border-primary focus:outline-none"
             >
               {customers.map((c) => (
@@ -464,10 +497,14 @@ export default function BlReviewPage() {
             </div>
           )}
 
-          {/* 周汇总箱货清单（整周一份，可选） */}
+          {/* 周汇总箱货清单（整周一份，可选）/ 星速全局箱货清单 */}
           <UploadBox
-            label="周汇总箱货清单 xlsx（可选，整周一份）"
-            description="按周导出的整份箱货清单，自动匹配每票底单；匹配不到回退文件夹内单票清单"
+            label={isXs ? "箱货清单 xlsx（星速，全局一份）" : "周汇总箱货清单 xlsx（可选，整周一份）"}
+            description={
+              isXs
+                ? "按 FBA 匹配英文品名 + 体积，自动填「品名 / 总体积」"
+                : "按周导出的整份箱货清单，自动匹配每票底单；匹配不到回退文件夹内单票清单"
+            }
             file={weeklyPackingFile}
             isDragging={weeklyDragging}
             dragHandlers={makeDragHandlers(setWeeklyDragging, setWeeklyPackingFile)}
@@ -483,24 +520,51 @@ export default function BlReviewPage() {
             onChange={handleWeeklySelect}
           />
 
-          {/* 物流追踪表（单独上传） */}
-          <UploadBox
-            label="物流追踪表 xlsx（可选，单独上传）"
-            description="用 FBA ID 匹配 ETD 开船日，自动填「起运日期」"
-            file={trackingFile}
-            isDragging={trackingDragging}
-            dragHandlers={makeDragHandlers(setTrackingDragging, setTrackingFile)}
-            onClear={() => setTrackingFile(null)}
-            inputRef={trackingInputRef}
-            onFileSelect={handleTrackingSelect}
-          />
-          <input
-            ref={trackingInputRef}
-            type="file"
-            accept=".xlsx"
-            className="hidden"
-            onChange={handleTrackingSelect}
-          />
+          {/* 星速订单列表（替代物流追踪表） */}
+          {isXs && (
+            <>
+              <UploadBox
+                label="订单列表 xlsx（星速，全局一份）"
+                description="按 FBA 匹配发往国家 / 开船时间 / 业务类型，自动填「起运港 / 目的港 / 起运日期」"
+                file={orderListFile}
+                isDragging={orderListDragging}
+                dragHandlers={makeDragHandlers(setOrderListDragging, setOrderListFile)}
+                onClear={() => setOrderListFile(null)}
+                inputRef={orderListInputRef}
+                onFileSelect={handleOrderListSelect}
+              />
+              <input
+                ref={orderListInputRef}
+                type="file"
+                accept=".xlsx"
+                className="hidden"
+                onChange={handleOrderListSelect}
+              />
+            </>
+          )}
+
+          {/* 物流追踪表（单独上传，星速改用订单列表） */}
+          {!isXs && (
+            <>
+              <UploadBox
+                label="物流追踪表 xlsx（可选，单独上传）"
+                description="用 FBA ID 匹配 ETD 开船日，自动填「起运日期」"
+                file={trackingFile}
+                isDragging={trackingDragging}
+                dragHandlers={makeDragHandlers(setTrackingDragging, setTrackingFile)}
+                onClear={() => setTrackingFile(null)}
+                inputRef={trackingInputRef}
+                onFileSelect={handleTrackingSelect}
+              />
+              <input
+                ref={trackingInputRef}
+                type="file"
+                accept=".xlsx"
+                className="hidden"
+                onChange={handleTrackingSelect}
+              />
+            </>
+          )}
 
           <div className="flex justify-center">
             <button
@@ -525,7 +589,9 @@ export default function BlReviewPage() {
 
           <div className="rounded-lg border border-zinc-200 bg-white p-4 text-sm text-zinc-500">
             <p>
-              💡 提示：① 同一票的底单 + 箱货清单放同一文件夹；② 底单被拆成多份（报/放/委托）会自动合并；③ 空白或含中文的字段会标红提醒（申请日期除外）。
+              {isXs
+                ? "💡 提示：① 星速每个底单 PDF = 一票（拆分的报关单/放行单会自动归入同票）；② 需另传「箱货清单」+「订单列表」两份全局 xlsx；③ 空白或含中文的字段会标红提醒（申请日期除外）。"
+                : "💡 提示：① 同一票的底单 + 箱货清单放同一文件夹；② 底单被拆成多份（报/放/委托）会自动合并；③ 空白或含中文的字段会标红提醒（申请日期除外）。"}
             </p>
           </div>
         </div>
@@ -654,7 +720,7 @@ export default function BlReviewPage() {
                   正在生成...
                 </>
               ) : (
-                <>✓ 确认生成 提单 + 保函</>
+                <>{isXs ? "✓ 确认生成 提单" : "✓ 确认生成 提单 + 保函"}</>
               )}
             </button>
           </div>
@@ -671,7 +737,7 @@ export default function BlReviewPage() {
               download
               className="inline-flex items-center gap-2 rounded-lg bg-primary px-5 py-2 text-sm font-medium text-white shadow-sm hover:bg-primary-dark transition-colors"
             >
-              ⬇️ 下载 ZIP（底单 + 提单 + 保函）
+              ⬇️ 下载 ZIP（{isXs ? "提单" : "底单 + 提单 + 保函"}）
             </a>
           </div>
           <ul className="divide-y divide-zinc-100">
@@ -692,17 +758,19 @@ export default function BlReviewPage() {
                   >
                     👁️ 提单
                   </button>
-                  <button
-                    onClick={() =>
-                      setPreviewFile({
-                        title: `电放保函 - ${p.folder}`,
-                        url: `/api/bl/file/${p.telex}`,
-                      })
-                    }
-                    className="rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-50 transition-colors"
-                  >
-                    👁️ 保函
-                  </button>
+                  {p.telex && (
+                    <button
+                      onClick={() =>
+                        setPreviewFile({
+                          title: `电放保函 - ${p.folder}`,
+                          url: `/api/bl/file/${p.telex}`,
+                        })
+                      }
+                      className="rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-50 transition-colors"
+                    >
+                      👁️ 保函
+                    </button>
+                  )}
                 </div>
               </li>
             ))}

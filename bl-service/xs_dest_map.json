@@ -1,0 +1,14 @@
+{
+  "海运": {
+    "英国": "FELIXSTOWE",
+    "德国": "ROTTERDAM,NL",
+    "法国": "ROTTERDAM,NL",
+    "荷兰": "ROTTERDAM,NL"
+  },
+  "陆运": {
+    "英国": "BRITAIN",
+    "德国": "GERMANY",
+    "法国": "FRANCE",
+    "荷兰": "NETHERLANDS"
+  }
+}

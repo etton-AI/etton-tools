@@ -600,6 +600,7 @@ interface PacificSplitResult {
 1. **批量**：点按钮选文件夹，每个子文件夹 = 一票（同一票的底单 PDF + 箱货清单 xlsx 放同一文件夹）；「物流追踪表」单独上传。底单被拆成多份（报/放/委托）自动先合并
 2. 审核表 = **提单 13 字段**（文件命名/shipper/consignee/提单号/柜号/船名航次/起运地/目的港/箱数/品名/总重量/总体积/起运日期）+ **保函 5 字段**（申请单位/运输工具/目的地/收货人(保函)/申请日期），逐格可编辑；**空白字段标红、含中文字段（申请日期除外）标红**提醒
 3. 人工核对/补填后 → 生成**提单 PDF（仅 PDF）** + **电放保函 DOCX（仅 DOC）** + **底单 PDF**，页面内预览提单/保函，再一键 ZIP 下载三份文件
+4. **星速(HNXS) 客户特殊流程**：Amazon FBA 直送，**无需电放保函**（generate 跳过 telex，ZIP 只含提单+底单）；无物流追踪表，改传「订单列表」xlsx（发往国家/开船时间/船名航次/业务类型）；shipper=境内发货人中文转拼音大写、consignee=`AMAZONFULFILMENTCENTER`、notify=`SAMEASCONSIGNEE`；目的港按「运输方式+发往国家」查 `xs_dest_map.json`（海运→实际港口、陆运→国家英文名），起运港海运`YANTIAN`/陆运`SHENZHEN`；前端每份 PDF 独立成一票（按文件名里 FBA 号分组，xlsx 忽略）。详见已知坑 #84
 
 #### 核心业务规则
 
@@ -1177,6 +1178,45 @@ interface PacificSplitResult {
     - 根因：柜号原用全文本 `_find_any(lines, r"[A-Z]{4}\d{7}")` 取第一个匹配，但海运提单号（如 `ZIMUNGB1391012S`）里 `UNGB1391012` 恰是「4 字母 + 7 数字」，且提单号行 y 比备注行更靠前，被误当柜号
     - 修复：新增 `_container_numbers`，只在备注「集装箱标箱数及号码：N;XXXX1234567;」上下文里 `findall` 柜号（海运/铁路底单格式一致），多柜分号拼接去重；无该上下文返回空（宁缺勿错，不再全文本兜底）
     - 位置：`bl-service/core.py`（`_container_numbers` + `extract_customs_data` 第 5 步柜号）
+
+84. **新增「星速(HNXS)」客户：Amazon FBA 直送，无物流追踪表、无需电放保函** (2026-09-11)
+    - 背景：星速是 FBA 直送客户，B/L 极简——consignee 固定 `AMAZONFULFILMENTCENTER`、notify 固定 `SAMEASCONSIGNEE`、shipper 变量（境内发货人中文 → pinyin 大写，经 `pypinyin.lazy_pinyin` 拼接后 `upper()`，括号内备注先剔除）；**不出电放保函**（`CUSTOMERS["星速"]["no_telex"]=True`，generate 跳过 telex，ZIP 只含提单+底单）
+    - 数据源差异：无「物流追踪表」，改由「订单列表」xlsx 提供 发往国家/开船时间/业务类型/船名航次；箱货清单的 FBA ID = 基础 12 位（`FBA`+9 位）+ `U` + 6 位序号 = 19 位，解析时用 `_base_fba` 截前 12 位分组
+    - 目的港映射 `xs_dest_map.json`（`{海运/陆运: {国家→英文}}`）：海运→实际港口（英国`FELIXSTOWE`、德国`ROTTERDAM,NL`）、陆运→国家英文名（英国`BRITAIN`、德国`GERMANY`）；起运港按运输方式固定——海运`YANTIAN`、陆运`SHENZHEN`；起运日期=订单列表「开船时间」无条件覆盖
+    - ⚠️ 坑1：`parse_order_list` 用 `openpyxl.load_workbook(read_only=True)` 时**只返回表头行、数据行全丢**（订单列表 xlsx 的 merged/格式导致）→ 必须 `load_workbook(path, data_only=True)`（去掉 read_only），实测 193 个 FBA 全部命中
+    - ⚠️ 坑2：订单列表「开船时间」单元格是 `"2026-07-03 00:00:00"` 带时分秒的字符串 → `_excel_date_str` 用正则 `^(\d{4}-\d{2}-\d{2})` 剥离
+    - FBA 匹配：`extract_customs_data` 里星速用 `_fba_from_text(full_text)` 从报关单全文取 FBA；`review_app` 里再优先 `_fba_from_text(folder)`（文件夹名）匹配订单列表/箱货清单，避免底单与文件夹名 FBA 不一致时错位
+    - 位置：`bl-service/core.py`（`_cn_to_pinyin_upper`/`_base_fba`/`_fba_from_text`/`load_xs_dest_map`/`apply_xs_map`/`parse_order_list`/`parse_packing_list_xs`/`CUSTOMERS["星速"]`）、`bl-service/xs_dest_map.json`、`bl-service/review_app.py`（extract-batch/generate 星速分支）、`src/app/bl-review/page.tsx`
+85. **星速提单 7 月真实数据比对后的一轮修复（6 处 + 发现的数据坑）** (2026-09-11)
+    - 用 18 张人工提单 PDF 作标准答案，逐字段比对自动化输出，修复以下 6 处结构性问题（`core.py`）：
+      1. **shipper 海运票为空**：报关底单「境内发货人」值行被 pdfplumber 拆成两行（公司名 y=101 / 关区名 y=100 基线差 1pt），`_value_row` 原来只取第一行（关区名 x0>250 被 `_leftmost` 丢弃）→ 改为合并标签下方 dy 范围内、与首个值行间距 ≤4pt 的相邻行（`_value_row` 加 `merge_gap` 参数）
+      2. **起运地**：原来海运固定 `YANTIAN` 是错的（外高桥/南沙港出口的票应为 SHANGHAI/NANSHA）→ 海运改查 `port_map.json` 的 `origin`（离境口岸→英文），无对照时保留中文供人工；陆运仍固定 `SHENZHEN`
+      3. **目的港**：① 加拿大美转加按「供应渠道」分流——含 `美森`/`CLX` → `LONGBEACH,CA`，否则 → `LOSANGELES,CA`（用户原话两处都写 LONGBEACH，实测非美森票人工写 LOSANGELES，故按数据修正）；直航加拿大（加东/加西普船）留空人工填。② 法国海运 `LE HAVRE` → `ROTTERDAM,NL`（`xs_dest_map.json` 同步改）
+      4. **体积**：原来用箱货清单「长×宽×高×箱数」是错的 → 改用订单列表「总CBM」列（与人工提单体积精确吻合，如 FBA15LZ786KB=1.6762）
+      5. **多 FBA 漏品名/体积**：底单文件名有逗号分隔（`FBA15LZW7KR4,FBA15M03GFHD`，同订单一行，总CBM 已聚合）和 `+6位后缀` 缩写（`FBA15M0WQDJZ+0S50DJ` = 两单合拼，第二个 FBA 与前一个共享前 6 位 `FBA15M`，总CBM 需按唯一订单行求和）→ 新增 `_fbas_from_text` 解析全部 FBA + `xs_apply_packing` 统一回填（品名跨 FBA 去重合并、体积按系统SO 去重求和）
+      6. **品名连写**：箱货清单英文品名去空格（`SOY CANDLES` → `SOYCANDLES`，对齐人工提单）
+    - ⚠️ 比对仍剩的差异均为**源数据/人工答案本身不一致**，非代码 bug：
+      - 品名命名不统一（9 票）：箱货清单英文品名里「香薰蜡烛」有 `Scented candle` / `Aromatherapy candle` 两种，人工提单大多统一写 `SOYCANDLES`（仅 FBA15M0SYJZL 写 `SCENTEDCANDLE`）；**已定：保持箱货清单英文品名原样（不归一）**，人工的 SOYCANDLES 归一视为人工简化，代码忠实输出源数据英文品名
+      - 体积精度（1 票）：FBA15M01RD74 订单列表总CBM=0.2849，人工提单四舍五入写 0.28
+      - 起运地（1 票）：FBA19HC7SYNT 报关单离境口岸=外高桥(→SHANGHAI)，人工提单写 NANSHA（与同船同柜的 FBA19HBRLVV3=SHANGHAI 矛盾，疑人工笔误）
+      - 目的港（1 票）：FBA15M0SYJZL 法国陆运人工写 `FRENCH`（语法错，应为 FRANCE）
+      - 日期（1 票）：FBA15M0QLY0L 订单列表开船时间=2026-07-29，人工提单写 7-20（差 9 天，源数据差异）
+    - 新增 `xs_apply_packing(rec, folder, xs_packing, order_map)` 取代 `review_app.py` 里散落的星速匹配逻辑（`_fba_from_text` + 单 FBA 查箱货清单 + 单 FBA 查订单列表）
+
+86. **星速批量上传「18 份底单只解析出 1 份」+ 体积/开船时间提炼不到——根因是客户下拉停在「拓锐」** (2026-09-11 修复)
+    - 症状：用户上传 7 月底单 18 份 PDF，结果表格只出现 1 票（文件夹名「7月底单」），且体积/开船时间/系统SO 全空
+    - 根因：客户下拉（拓锐 vs 星速）**不持久化**，刷新页面即重置回默认「拓锐」；前端重启后用户未重新选「星速」就直接上传。拓锐模式下分组规则是「每个子文件夹 = 一票」，18 份 PDF 同在「7月底单」目录 → 被并成 1 票；且拓锐分支不解析订单列表/星速箱货清单，故体积（订单列表总CBM）、开船时间（订单列表开船时间）、系统SO（箱货清单）全部为空
+    - 修复（`src/app/bl-review/page.tsx`）：
+      1. 客户选择持久化到 `localStorage("bl_customer")`——`useState` 惰性初始化读 localStorage，下拉 onChange 写回；`useEffect` 仅在无持久化值时回退后端默认值
+      2. 星速目录上传时文件名可能带相对路径前缀（部分浏览器 `webkitdirectory` 把 `7月底单/xxx.pdf` 塞进 `File.name`），`handleFolderSelect` 里先 `f.name.split("/").pop()` 取纯文件名再 `xsTicketBase`
+    - 验证：直接跑 `core.parse_order_list` + `parse_packing_list_xs` + `xs_apply_packing` 遍历 18 份底单，18/18 都正确回填体积与开船时间（体积=订单列表总CBM，与人工提单逐票吻合）；故核心逻辑无误，纯属前端客户态问题
+
+87. **星速提单改套用拓锐 ETTON 邮件合并模板（废弃「极简版」）** (2026-09-11 修复)
+    - 症状：用户发现星速生成的提单是「带字段标签的极简版」（`B/L NO:`/`Shipper:`/`Consignee:` 等标签印在 PDF 上），与拓锐导出的真实 ETTON 提单模板完全不符；人工星速提单实为「无标签、标准 ETTON 版式」
+    - 根因：`generate_batch` 里对 `is_xs` 单独走了 `fill_xs_bl_docx()`（从零用 `python-docx` 拼段落、每行带 `label:` 前缀），而不是与其他客户共用 `fill_bl_docx()`（`提单模板.docx` 邮件合并 MERGEFIELD）
+    - 修复：删除 `generate_batch` 的 `if is_xs` 提单分支，所有客户统一走 `fill_bl_docx(bl_template, ...)`；删除废弃的 `fill_xs_bl_docx` / `_xs_date_short`（星速日期改用模板统一 `_date_to_bl` 输出 `DD MMM YYYY`，如 `03 JUL 2026`）
+    - 效果：星速提单与拓锐共用同一模板——shipper 拼音大写、consignee `AMAZONFULFILMENTCENTER`、notify 由模板静态文字 `SAME AS CONSIGNEE` 自动显示；唛头 `N/M`、装卸 `CFS TO CFS`、单位 `CTNS`/`KGS`/`CBM`、`FREIGHT PREPAID`、`SHIPPED ON BOARD:` 均为模板静态文字；柜号海运有值、陆运留空。18 票实测全部生成，shipper 长文本（最长 48 字符）换行与人工提单一致
+    - 位置：`bl-service/core.py`（`generate_batch`）
 
 ### 待重构项
 
