@@ -168,6 +168,8 @@ export default function BlReviewPage() {
   const weeklyInputRef = useRef<HTMLInputElement>(null);
   const orderListInputRef = useRef<HTMLInputElement>(null);
   const isXs = customer === "星速";
+  const isLs = customer === "朗胜";
+  const isNoTelex = isXs || isLs;
 
   // 页面加载时拉取客户列表（加客户只改后端 CUSTOMERS，前端下拉自动更新）
   useEffect(() => {
@@ -235,8 +237,8 @@ export default function BlReviewPage() {
       const isPdf = name.endsWith(".pdf");
       const isXlsx = name.endsWith(".xlsx") || name.endsWith(".xls");
       let folder: string;
-      if (isXs) {
-        // 星速：每个底单 PDF = 一票；拆分底单（报关单/放行单/委托协议）按文件名去后缀归入同票
+      if (isNoTelex) {
+        // 星速/朗胜：每个底单 PDF = 一票；拆分底单（报关单/放行单/委托协议）按文件名去后缀归入同票
         if (!isPdf) continue;
         // 部分浏览器目录上传会把相对路径（如「7月底单/xxx.pdf」）塞进 name，这里统一取纯文件名
         folder = xsTicketBase(f.name.split("/").pop() || f.name);
@@ -248,8 +250,8 @@ export default function BlReviewPage() {
       const g = groups.get(folder)!;
       if (isPdf) {
         g.pdfs.push(f);
-      } else if (isXlsx && !isXs) {
-        // 优先把文件名含「箱/货/清单/packing」的 xlsx 识别为箱货清单（星速箱货清单走全局上传）
+      } else if (isXlsx && !isNoTelex) {
+        // 优先把文件名含「箱/货/清单/packing」的 xlsx 识别为箱货清单（星速/朗胜箱货清单走全局上传）
         if (!g.packing || /箱|货|清单|packing/i.test(f.name)) g.packing = f;
       }
     }
@@ -257,7 +259,7 @@ export default function BlReviewPage() {
     setFolderGroups(list);
     setError(null);
     setNotice(
-      `已识别 ${list.length} 票${isXs ? "（FBA）" : "（文件夹）"}，共 ${list.reduce((n, g) => n + g.pdfs.length, 0)} 份底单 PDF`,
+      `已识别 ${list.length} 票${isNoTelex ? (isXs ? "（FBA）" : "（系统SO）") : "（文件夹）"}，共 ${list.reduce((n, g) => n + g.pdfs.length, 0)} 份底单 PDF`,
     );
   };
 
@@ -372,7 +374,7 @@ export default function BlReviewPage() {
     }
   };
 
-  const columns = [...blFields, ...(isXs ? [] : telexFields)].filter((c) => c !== "文件命名");
+  const columns = [...blFields, ...(isNoTelex ? [] : telexFields)].filter((c) => c !== "文件命名");
   const hasResult = tickets.length > 0;
   const generated = zipUrl != null;
 
@@ -383,7 +385,7 @@ export default function BlReviewPage() {
         <div>
           <h1 className="text-2xl font-bold text-deep">📦 提单 + 电放保函（批量）</h1>
           <p className="mt-1 text-sm text-zinc-500">
-            按文件夹批量上传 → 自动提取 → <span className="font-semibold text-primary">人工审核</span> → 生成提单{isXs ? "" : " & 电放保函"}
+            按文件夹批量上传 → 自动提取 → <span className="font-semibold text-primary">人工审核</span> → 生成提单{isNoTelex ? "" : " & 电放保函"}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -497,13 +499,21 @@ export default function BlReviewPage() {
             </div>
           )}
 
-          {/* 周汇总箱货清单（整周一份，可选）/ 星速全局箱货清单 */}
+          {/* 周汇总箱货清单（整周一份，可选）/ 星速、朗胜全局箱货清单 */}
           <UploadBox
-            label={isXs ? "箱货清单 xlsx（星速，全局一份）" : "周汇总箱货清单 xlsx（可选，整周一份）"}
+            label={
+              isXs
+                ? "箱货清单 xlsx（星速，全局一份）"
+                : isLs
+                  ? "箱货清单 xlsx（朗胜，全局一份）"
+                  : "周汇总箱货清单 xlsx（可选，整周一份）"
+            }
             description={
               isXs
                 ? "按 FBA 匹配英文品名 + 体积，自动填「品名 / 总体积」"
-                : "按周导出的整份箱货清单，自动匹配每票底单；匹配不到回退文件夹内单票清单"
+                : isLs
+                  ? "按系统SO匹配英文品名 + 体积（长×宽×高×箱数），自动填「品名 / 总体积」"
+                  : "按周导出的整份箱货清单，自动匹配每票底单；匹配不到回退文件夹内单票清单"
             }
             file={weeklyPackingFile}
             isDragging={weeklyDragging}
@@ -520,12 +530,16 @@ export default function BlReviewPage() {
             onChange={handleWeeklySelect}
           />
 
-          {/* 星速订单列表（替代物流追踪表） */}
-          {isXs && (
+          {/* 星速/朗胜订单列表（替代物流追踪表） */}
+          {isNoTelex && (
             <>
               <UploadBox
-                label="订单列表 xlsx（星速，全局一份）"
-                description="按 FBA 匹配发往国家 / 开船时间 / 业务类型，自动填「起运港 / 目的港 / 起运日期」"
+                label={isXs ? "订单列表 xlsx（星速，全局一份）" : "订单列表 xlsx（朗胜，全局一份）"}
+                description={
+                  isXs
+                    ? "按 FBA 匹配发往国家 / 开船时间 / 业务类型，自动填「起运港 / 目的港 / 起运日期」"
+                    : "按系统SO匹配开船时间，自动填「起运日期」（目的港从底单装箱单页提取）"
+                }
                 file={orderListFile}
                 isDragging={orderListDragging}
                 dragHandlers={makeDragHandlers(setOrderListDragging, setOrderListFile)}
@@ -543,8 +557,8 @@ export default function BlReviewPage() {
             </>
           )}
 
-          {/* 物流追踪表（单独上传，星速改用订单列表） */}
-          {!isXs && (
+          {/* 物流追踪表（单独上传，星速/朗胜改用订单列表） */}
+          {!isNoTelex && (
             <>
               <UploadBox
                 label="物流追踪表 xlsx（可选，单独上传）"
@@ -591,7 +605,9 @@ export default function BlReviewPage() {
             <p>
               {isXs
                 ? "💡 提示：① 星速每个底单 PDF = 一票（拆分的报关单/放行单会自动归入同票）；② 需另传「箱货清单」+「订单列表」两份全局 xlsx；③ 空白或含中文的字段会标红提醒（申请日期除外）。"
-                : "💡 提示：① 同一票的底单 + 箱货清单放同一文件夹；② 底单被拆成多份（报/放/委托）会自动合并；③ 空白或含中文的字段会标红提醒（申请日期除外）。"}
+                : isLs
+                  ? "💡 提示：① 朗胜每个底单 PDF = 一票（拆分的报关单/放行单会自动归入同票）；② 需另传「箱货清单」+「订单列表」两份全局 xlsx；③ 朗胜底单须含装箱单（联单页），缺装箱单上传时会提醒；④ 目的港从装箱单页自动提取，识别不到需手工填写。"
+                  : "💡 提示：① 同一票的底单 + 箱货清单放同一文件夹；② 底单被拆成多份（报/放/委托）会自动合并；③ 空白或含中文的字段会标红提醒（申请日期除外）。"}
             </p>
           </div>
         </div>
@@ -720,7 +736,7 @@ export default function BlReviewPage() {
                   正在生成...
                 </>
               ) : (
-                <>{isXs ? "✓ 确认生成 提单" : "✓ 确认生成 提单 + 保函"}</>
+                <>{isXs ? "✓ 确认生成 提单" : isLs ? "✓ 确认生成 提单 + 底单" : "✓ 确认生成 提单 + 保函"}</>
               )}
             </button>
           </div>
@@ -737,7 +753,7 @@ export default function BlReviewPage() {
               download
               className="inline-flex items-center gap-2 rounded-lg bg-primary px-5 py-2 text-sm font-medium text-white shadow-sm hover:bg-primary-dark transition-colors"
             >
-              ⬇️ 下载 ZIP（{isXs ? "提单" : "底单 + 提单 + 保函"}）
+              ⬇️ 下载 ZIP（{isXs ? "提单" : isLs ? "提单 + 底单" : "底单 + 提单 + 保函"}）
             </a>
           </div>
           <ul className="divide-y divide-zinc-100">

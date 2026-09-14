@@ -230,6 +230,7 @@ def api_extract_batch():
 
     customer = (request.form.get("customer") or core.DEFAULT_CUSTOMER).strip()
     is_xs = (customer == "星速")
+    is_ls = (customer == "朗胜")
 
     # 2. 物流追踪表：解析一次，全局共享（{FBA ID: {etd, eta, vessel}}）
     track_map = {}
@@ -243,9 +244,10 @@ def api_extract_batch():
             except Exception:
                 track_map = {}
 
-    # 2b. 周汇总箱货清单：解析一次，全局共享（拓锐按工作号分组；星速按基础 FBA 分组）
+    # 2b. 周汇总箱货清单：解析一次，全局共享（拓锐按工作号分组；星速按基础 FBA 分组；朗胜按系统SO分组）
     weekly_groups = []
     xs_packing = {}
+    ls_packing = {}
     if "weekly_packing" in request.files:
         wf = request.files["weekly_packing"]
         if wf and wf.filename:
@@ -254,20 +256,22 @@ def api_extract_batch():
             try:
                 if is_xs:
                     xs_packing = core.parse_packing_list_xs(w_path)
+                elif is_ls:
+                    ls_packing = core.parse_packing_list_ls(w_path)
                 else:
                     weekly_groups = core.parse_packing_list_weekly(w_path)
             except Exception:
                 weekly_groups = []
 
-    # 2c. 星速订单列表：发往国家 / 开船时间 / 业务类型 / 船名航次（全局一份，按 FBA 匹配）
+    # 2c. 星速/朗胜订单列表：发往国家 / 开船时间 / 业务类型 / 船名航次（全局一份；星速按 FBA、朗胜按系统SO 匹配）
     order_map = {}
-    if is_xs and "order_list" in request.files:
+    if (is_xs or is_ls) and "order_list" in request.files:
         of = request.files["order_list"]
         if of and of.filename:
             o_path = os.path.join(UPLOAD, f"order_{datetime.now().strftime('%Y%m%d%H%M%S%f')}.xlsx")
             of.save(o_path)
             try:
-                order_map = core.parse_order_list(o_path)
+                order_map = core.parse_order_list(o_path) if is_xs else core.parse_order_list_ls(o_path)
             except Exception:
                 order_map = {}
 
@@ -313,6 +317,27 @@ def api_extract_batch():
                 warning = "起运日期为空（订单列表未匹配到开船时间），请手工填写"
             if not (rec.get("目的港") or "").strip():
                 msg = "目的港为空（发往国家未匹配映射），请手工填写英文目的港"
+                warning = f"{warning}；{msg}" if warning else msg
+        elif is_ls:
+            # 朗胜：装箱单检测 + 目的港提取（装箱单页港口代码/英文）；按文件名系统SO匹配箱货清单（品名/体积）+ 订单列表（起运日期）
+            has_packing, dest = core.ls_detect_packing(merged_pdf)
+            if dest:
+                rec["目的港"] = dest
+                rec["目的地"] = dest
+            else:
+                # 装箱单页未识别到港口 → 保留 extract 的「指运港」中文（如「长滩（美国）」）
+                # 供 ls_apply_packing 兜底映射；清空目的港本体，避免「美国」泛称顶掉兜底
+                rec["_指运港_中文"] = (rec.get("目的港") or "").strip()
+                rec["目的港"] = ""
+                rec["目的地"] = ""
+            core.ls_apply_packing(rec, folder, ls_packing, order_map)
+            if not has_packing:
+                warning = "缺装箱单（朗胜底单须含装箱单联单页），请补充"
+            if not (rec.get("起运日期") or "").strip():
+                msg = "起运日期为空（订单列表未匹配到开船时间），请手工填写"
+                warning = f"{warning}；{msg}" if warning else msg
+            if not (rec.get("目的港") or "").strip():
+                msg = "目的港为空（装箱单页未识别到港口），请手工填写英文目的港"
                 warning = f"{warning}；{msg}" if warning else msg
         else:
             # 箱货清单：优先周汇总匹配，匹配不到回退每票单票清单
@@ -413,9 +438,9 @@ def api_generate():
     if not tickets:
         return jsonify({"ok": False, "error": "无数据"}), 400
 
-    # 记忆回写：中文港口 → 英文；带渠道的票改目的港后记入 channel_map（星速走 xs_dest_map，不参与）
+    # 记忆回写：中文港口 → 英文；带渠道的票改目的港后记入 channel_map（星速走 xs_dest_map、朗胜走专用港口代码映射，均不参与）
     records = [t["record"] for t in tickets]
-    if customer != "星速":
+    if customer not in ("星速", "朗胜"):
         core.remember_ports(records)
         core.remember_channels(records)
 

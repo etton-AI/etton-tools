@@ -1218,6 +1218,23 @@ interface PacificSplitResult {
     - 效果：星速提单与拓锐共用同一模板——shipper 拼音大写、consignee `AMAZONFULFILMENTCENTER`、notify 由模板静态文字 `SAME AS CONSIGNEE` 自动显示；唛头 `N/M`、装卸 `CFS TO CFS`、单位 `CTNS`/`KGS`/`CBM`、`FREIGHT PREPAID`、`SHIPPED ON BOARD:` 均为模板静态文字；柜号海运有值、陆运留空。18 票实测全部生成，shipper 长文本（最长 48 字符）换行与人工提单一致
     - 位置：`bl-service/core.py`（`generate_batch`）
 
+88. **新增「朗胜(LSGKJ)」客户：底单强制装箱单 + 目的港从装箱单页提取 + 体积用箱货清单长宽高** (2026-09-14)
+    - 背景：朗胜为美加 FBA 海运，数据源同星速（订单列表 + 箱货清单 + 每票报关底单 PDF），提单同样套拓锐 ETTON 模板、`no_telex=True`（不出电放保函）。与星速的两个关键差异：
+      1. **底单必须含「装箱单」**（报关底单最后一页的集装箱装箱单「联单」页）——`ls_detect_packing(pdf_path)` 遍历 PDF 各页文本，命中「联单」/「纸板箱」/「装货单」/「SHIPPING ORDER」任一关键词即判有装箱单；无装箱单则 `warning`「缺装箱单（朗胜底单须含装箱单联单页）」**仅提醒不阻断**。
+      2. **目的港有 5 个**（HOUSTON,TX / LONGBEACH,CA / LOSANGELES,CA / VANCOUVER,BC / PRINCERUPERT,BC），从装箱单页自动提取——装箱单页两种写法都要识别：港口代码（`USHOU`/`USLGB`/`USLAX`/`USVAN`/`CAPRR` → 老格式）或英文目的港（`HOUSTON`/`LONG BEACH`/`LOS ANGELES`/`VANCOUVER`/`PRINCE RUPERT` → 新格式，去空格匹配）；识别不到留空，兜底按供应渠道「休斯顿」→`HOUSTON,TX`，其余人工填。
+    - **体积关键坑（与星速相反）**：朗胜体积必须用箱货清单「长×宽×高×总箱数」求和（实测 47.5483 ≈ 提单 47.5614），**不能用订单列表「总CBM」**（那列是计费体积，实测 52.71 不匹配）。星速 #85 用订单列表总CBM，朗胜用箱货清单长宽高，两客户逻辑相反，勿混淆。
+    - **系统SO 匹配**：朗胜一票 = 多个系统SO（`LSGKJ`+YYMM+NNNN，如 `LSGKJ26050001`），通过底单文件名里的系统SO列表关联箱货清单/订单列表。文件名四种写法：完整 SO（`LSGKJ26050001`）、完整范围（`LSGKJ26050001-LSGKJ26050008`）、范围缩写（`LSGKJ26060041-50`）、单缩写（`LSGKJ26050118+119+68`，序号小于前一序号时进位补百位）。`_ls_sos_from_text()` 统一解析。
+    - 品名 = 箱货清单英文品名去空格大写（同星速）；船名航次从报关底单取（朗胜订单列表船名/船次常为空）；起运日期 = 订单列表「开船时间」；起运地复用 `apply_port_map`（离境口岸，已补 `蛇口→SHEKOU`、`上海→SHANGHAI`）。
+    - ZIP 输出：朗胜 `{folder}-提单.pdf` + `{folder}-底单.pdf`（底单含装箱单）平铺根目录，不含保函；`generate_batch` 里 `is_ls` 独立分支（星速 ZIP 不含底单、朗胜含底单）。
+    - **装箱单检测两个坑（实测 54 份底单验证）**：
+      1. 部分报关系统导出的 PDF 中文文本层是乱码（ToUnicode CMap 映射错，`纸板箱` 提取成 `ֽ����` 等），`extract_text()` 的中文关键词「联单/纸板箱/装货单」会失效——但港口代码（`USHOU` 等）是 ASCII 不受影响。故 `ls_detect_packing` 以**港口代码/英文目的港命中**作为「有装箱单」的可靠标志（朗胜装箱单页必含港口代码），中文关键词仅作兼容。
+      2. `pdfplumber` 的 page 对象在 `with pdfplumber.open()` 块**外**调用 `extract_text()` 会报 `seek of closed file`（PDF 已关），必须**在 with 块内**遍历提取文本。实测：54 份底单中 42 份提取到目的港（5 港口全覆盖）、3 份无装箱单（`LSGKJ26060036+37+39+40`/`LSGKJ26060055-76`/`LSGKJ26060077`，文件名无「装箱单」）正确触发缺装箱单提醒、装货单格式（`LSGKJ26060090-93`，SHIPPING ORDER）有装箱单但目的港只写 `United States` → 留空兜底供应渠道或人工填。
+    - **6月对比回测又发现并修复的三个坑**：
+      3. **洋山港格式（上海洋山港报关行）底单**：文字层把每个中文字符重复两次（`离离境境口口岸岸`），3 字以上标签（离境口岸/指运港/运抵国/提运单号/运输工具）匹配不到，`LSGKJ26060036+37+39+40`/`LSGKJ26060077` 两票的起运地/目的港/柜号/提单号/船名航次全空。修复：`extract_customs_data` 在匹配前用 `_dedouble_words`（`_dedouble_cjk_text` 只折叠连续重复 CJK，ASCII/数字如 `223120260002613782` 里的 `00` 不动）统一去重；`_container_numbers` 兼容洋山港「集装箱标箱数及号码:XXXX1234567」（无 `N;` 计数）与放行通知书「集装箱号：XXXX1234567」；`port_map.origin` 补 `洋山港→SHANGHAI`、`洋山港区→SHANGHAI`。
+      4. **无装箱单票的目的港兜底**：`LSGKJ26060036+37+39+40`/`LSGKJ26060077`（洋山港）指运港写具体港口「长滩（美国）」，`LSGKJ26060055-76`（深圳）指运港是泛称「美国」。修复：朗胜分支清空目的港前把 `rec["目的港"]`（指运港中文）存 `rec["_指运港_中文"]`，`ls_apply_packing` 用 `LS_CN_DEST_MAP`（长滩/洛杉矶/温哥华/王子港/休斯顿 → 英文）兜底；泛称「美国」不命中仍留空人工填（`LSGKJ26060055-76` 答案 LONGBEACH,CA 是人工从其他资料补的，无法自动取）。
+      5. **系统SO 范围重叠**：`LSGKJ26050150-LSGKJ26050182` 文件名展开 33 个 SO，但本票只含 150-161+171-182（24 个 SO，912 件），中间 `162-170`（9 个 SO，645 件）是独立票（`LSGKJ26050162-LSGKJ26050170`），导致体积从 32.41 虚高到 61.20。修复：`_ls_filter_sos_by_boxes` 用报关单「件数」校验展开 SO 的箱数总和，不等时去掉一个连续子区间使剩余箱数=件数；箱数可能多解（158-167 与 162-170 都是 645 箱），再用报关单「毛重」从候选中挑最接近者消歧（正确子集剩余毛重 5349.37 最接近 5347.52）。
+    - 位置：`bl-service/core.py`（`CUSTOMERS["朗胜"]`/`LS_PORT_CODE_MAP`/`LS_DEST_EN_MAP`/`LS_CN_DEST_MAP`/`ls_detect_packing`/`_ls_sos_from_text`/`_ls_filter_sos_by_boxes`/`parse_order_list_ls`/`parse_packing_list_ls`/`ls_apply_packing`/`_dedouble_cjk_text`/`_dedouble_words`/`generate_batch`）、`bl-service/review_app.py`（extract-batch/generate 朗胜分支）、`bl-service/port_map.json`（origin 补蛇口/上海/洋山港）、`src/app/bl-review/page.tsx`
+
 ### 待重构项
 
 - [ ] 将 session 存储从内存 Map 改为临时文件或 Redis

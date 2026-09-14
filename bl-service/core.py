@@ -46,6 +46,27 @@ CUSTOMERS = {
         "telex_from": "",
         "no_telex": True,
     },
+    "朗胜": {
+        "label": "朗胜（LSGKJ）",
+        # 朗胜：shipper/consignee 固定，通知方 = 同收货人（模板静态文本）；无需电放保函（no_telex）。
+        # 底单必须含「装箱单」（联单页），缺装箱单上传时提醒（见 ls_detect_packing）。
+        "shipper_bl": (
+            "SHENZHENSHILANZHONGDIANZIYOUXIANGONGSI\n"
+            "ROOM 303, BLOCK B, BUILDING 7, SHENZHEN\n"
+            "INTERNATIONAL\n"
+            "INNOVATION VALLEY, DASHI 1ST RD., XILI COMMUNITY,\n"
+            "XILI ST., NANSHAN\n"
+            "DIST., SHENZHEN\n"
+            "CHINA"
+        ),
+        "consignee_bl": "LONG SUN TECHNOLOGY CO., LIMITED\n1150 N Del Rio Pl, Ontario, CA91764",
+        "shipper_telex": "",
+        "consignee_telex": "",
+        "telex_header": "",
+        "telex_to": "",
+        "telex_from": "",
+        "no_telex": True,
+    },
 }
 DEFAULT_CUSTOMER = "拓锐"
 
@@ -527,6 +548,410 @@ def xs_apply_packing(rec, folder, xs_packing, order_map):
     return rec
 
 
+# ---------- 朗胜（LSGKJ）专用：目的港 / 装箱单 / 订单列表 / 箱货清单 ----------
+# 朗胜为美加 FBA 海运，shipper/consignee 固定，无需电放保函（no_telex），提单共用拓锐模板。
+# 底单必须含「装箱单」（联单页），缺装箱单上传时提醒；目的港（5 个美加港口）从装箱单页
+# 的港口代码（USHOU/USLGB/USLAX/USVAN/CAPRR）或英文目的港（HOUSTON/LONG BEACH 等）提取。
+
+# 装箱单页港口代码 → 提单目的港（老格式，5 位代码）
+LS_PORT_CODE_MAP = {
+    "USHOU": "HOUSTON,TX",
+    "USLGB": "LONGBEACH,CA",
+    "USLAX": "LOSANGELES,CA",
+    "USVAN": "VANCOUVER,BC",
+    "CAPRR": "PRINCERUPERT,BC",
+}
+
+# 装箱单页英文目的港 → 提单目的港（新格式，写英文港口名；匹配时去空格比较）
+LS_DEST_EN_MAP = {
+    "HOUSTON": "HOUSTON,TX",
+    "LONGBEACH": "LONGBEACH,CA",
+    "LOSANGELES": "LOSANGELES,CA",
+    "VANCOUVER": "VANCOUVER,BC",
+    "PRINCERUPERT": "PRINCERUPERT,BC",
+}
+
+# 报关单「指运港」中文 → 提单目的港（无装箱单的票，指运港写具体港口名时兜底，
+# 如洋山港票「长滩（美国）」→ LONGBEACH,CA；指运港为「美国」泛称时不命中留空）
+LS_CN_DEST_MAP = {
+    "长滩": "LONGBEACH,CA",
+    "洛杉矶": "LOSANGELES,CA",
+    "休斯顿": "HOUSTON,TX",
+    "温哥华": "VANCOUVER,BC",
+    "王子港": "PRINCERUPERT,BC",
+}
+
+# 装箱单页关键词（任一命中即判「有装箱单」）
+_LS_PACKING_KEYWORDS = ("联单", "纸板箱", "装货单", "SHIPPING ORDER", "SHIPPINGORDER")
+
+
+def ls_detect_packing(pdf_path):
+    """检测朗胜底单 PDF 是否含装箱单页，并提取目的港。
+
+    朗胜装箱单页必含目的港港口代码（USHOU/USLGB/USLAX/USVAN/CAPRR，5 个美加港口）。
+    港口代码是 ASCII，不受部分报关系统 PDF 中文文本层乱码（ToUnicode 映射错）影响，
+    故以「港口代码 / 英文目的港命中」作为「有装箱单」的可靠标志；中文标题关键词
+    （联单/纸板箱/装货单/SHIPPING ORDER）仅作为文本层正确编码时的补充兼容。
+    返回 (has_packing, dest)；dest 为空字符串表示未识别到目的港。
+    """
+    import pdfplumber
+    has_packing = False
+    dest = ""
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                try:
+                    text = page.extract_text() or ""
+                except Exception:
+                    continue
+                if not text:
+                    continue
+                if any(kw in text for kw in _LS_PACKING_KEYWORDS):
+                    has_packing = True
+                if not dest:
+                    joined = text.replace(" ", "").upper()
+                    for code, d in LS_PORT_CODE_MAP.items():
+                        if code in joined:
+                            dest = d
+                            has_packing = True
+                            break
+                    if not dest:
+                        for en, d in LS_DEST_EN_MAP.items():
+                            if en in joined:
+                                dest = d
+                                has_packing = True
+                                break
+    except Exception:
+        pass
+    return has_packing, dest
+
+
+def _ls_sos_from_text(text):
+    """从朗胜底单文件名提取系统SO列表（LSGKJ + 8 位数字）。
+
+    支持四种写法：
+      - 完整 SO：LSGKJ26050001
+      - 完整范围：LSGKJ26050001-LSGKJ26050008（展开中间序号）
+      - 范围缩写：LSGKJ26060041-50（后半缩写，共享前半前缀）
+      - 单缩写：LSGKJ26050118+119+68（+ 后缩写，共享前一个 SO 前缀，序号小于前一序号时进位）
+    """
+    text = text or ""
+    sos = []
+    # 1) 完整 SO
+    for m in re.finditer(r"LSGKJ\d{8}", text):
+        so = m.group(0)
+        if so not in sos:
+            sos.append(so)
+    # 2) 完整范围 LSGKJ\d{8}-LSGKJ\d{8}
+    for m in re.finditer(r"LSGKJ(\d{8})-LSGKJ(\d{8})", text):
+        a, b = m.group(1), m.group(2)
+        if a[:4] != b[:4]:
+            continue
+        try:
+            na, nb = int(a[4:]), int(b[4:])
+        except ValueError:
+            continue
+        for n in range(na, nb + 1):
+            so = f"LSGKJ{a[:4]}{n:04d}"
+            if so not in sos:
+                sos.append(so)
+    # 3) 范围缩写 LSGKJ(\d{8})-(\d{1,4})
+    for m in re.finditer(r"LSGKJ(\d{8})-(\d{1,4})(?!\d)", text):
+        full, suffix = m.group(1), m.group(2)
+        prefix = full[:4]
+        try:
+            na = int(full[4:])
+            nb = int(suffix)
+            while nb < na:
+                nb += 10 ** len(suffix)
+        except ValueError:
+            continue
+        for n in range(na, nb + 1):
+            so = f"LSGKJ{prefix}{n:04d}"
+            if so not in sos:
+                sos.append(so)
+    # 4) 单缩写 +\d{1,4}
+    for m in re.finditer(r"\+(\d{1,4})(?!\d)", text):
+        suffix = m.group(1)
+        prev = re.findall(r"LSGKJ(\d{4})(\d{4})", text[:m.start()])
+        if not prev:
+            continue
+        prefix, seq_str = prev[-1]
+        try:
+            prev_seq = int(seq_str)
+            n = int(suffix)
+            while n < prev_seq:
+                n += 10 ** len(suffix)
+        except ValueError:
+            continue
+        so = f"LSGKJ{prefix}{n:04d}"
+        if so not in sos:
+            sos.append(so)
+    return sos
+
+
+def _ls_filter_sos_by_boxes(sos, rec, ls_packing):
+    """朗胜：底单文件名展开的系统SO可能与其他票重叠（如「150-182」里「162-170」是独立票）。
+
+    用报关单「件数」(箱数) 校验：若展开 SO 的箱数总和 ≠ 报关单件数，说明范围多算/少算，
+    尝试去掉一个连续子区间使剩余箱数总和 = 件数（重叠票通常是连续一段）。箱数相同可能有
+    多个候选子区间，再用报关单「毛重」从候选里挑最接近者消歧。找不到匹配则保留原列表。
+    """
+    if not sos or len(sos) < 2:
+        return list(sos)
+
+    def _int(v):
+        try:
+            return int(float(str(v).strip()))
+        except (ValueError, TypeError):
+            return None
+
+    def _float(v):
+        try:
+            return float(str(v).strip())
+        except (ValueError, TypeError):
+            return None
+
+    target_boxes = _int(rec.get("箱数"))
+    if target_boxes is None:
+        return sorted(sos)
+    target_weight = _float(rec.get("总重量"))
+
+    ordered = sorted(sos)
+    boxes, weights = [], []
+    for so in ordered:
+        pk = ls_packing.get(so)
+        boxes.append(_int(pk.get("boxes")) if pk and pk.get("boxes") is not None else 0)
+        weights.append(_float(pk.get("total_weight")) if pk else 0.0)
+
+    total_boxes = sum(b for b in boxes if b is not None)
+    if total_boxes == target_boxes:
+        return ordered
+    if total_boxes < target_boxes:
+        return ordered  # 欠包含：暂不支持反推补全
+
+    # 过包含：找连续子区间去掉后箱数==件数，且剩余毛重最接近报关单毛重
+    total_weight = sum(w for w in weights if w is not None)
+    best = None
+    for i in range(len(boxes)):
+        sb, sw = 0, 0.0
+        for j in range(i, len(boxes)):
+            sb += boxes[j] or 0
+            sw += weights[j] or 0.0
+            if total_boxes - sb == target_boxes:
+                err = abs((total_weight - sw) - target_weight) if target_weight is not None else 0.0
+                if best is None or err < best[0]:
+                    best = (err, i, j)
+    if best is not None:
+        _, i, j = best
+        return ordered[:i] + ordered[j + 1:]
+    return ordered
+
+
+def parse_order_list_ls(xlsx_path):
+    """解析朗胜「订单列表」xlsx，按系统SO索引，返回 {系统SO: {country, ship_time, vessel, voyage, biz_type, supply, channel, cbm, kg, boxes}}。
+
+    朗胜订单列表船名/船次常为空（船名航次从报关底单提取），保留解析以备兜底。
+    """
+    wb = load_workbook(xlsx_path, data_only=True)
+    ws = wb.worksheets[0]
+    rows = list(ws.iter_rows(values_only=True))
+    wb.close()
+
+    _WANT = {
+        "发往国家": "country", "开船时间": "ship_time", "船名": "vessel",
+        "船次": "voyage", "业务类型": "biz_type", "系统SO": "so", "供应渠道": "supply",
+        "客户渠道": "channel", "总CBM": "cbm", "总KG": "kg", "总箱数": "boxes",
+    }
+    cols = {}
+    header_idx = None
+    for i, row in enumerate(rows[:5]):
+        if not row:
+            continue
+        for j, v in enumerate(row):
+            s = str(v).strip() if v is not None else ""
+            if s in _WANT and _WANT[s] not in cols:
+                cols[_WANT[s]] = j
+        if "so" in cols and header_idx is None:
+            header_idx = i
+    if "so" not in cols:
+        return {}
+
+    so_col = cols["so"]
+
+    def _g(row, key):
+        c = cols.get(key)
+        return str(row[c]).strip() if c is not None and c < len(row) and row[c] else ""
+
+    def _num(row, key):
+        c = cols.get(key)
+        if c is None or c >= len(row) or row[c] is None:
+            return ""
+        return float(row[c]) if isinstance(row[c], (int, float)) else ""
+
+    index = {}
+    for row in rows[(header_idx + 1):]:
+        if not row or so_col >= len(row) or not row[so_col]:
+            continue
+        so = str(row[so_col]).strip()
+        if not so:
+            continue
+        index[so] = {
+            "country": _g(row, "country"),
+            "ship_time": _excel_date_str(row[cols["ship_time"]]) if "ship_time" in cols and cols["ship_time"] < len(row) and row[cols["ship_time"]] else "",
+            "vessel": _g(row, "vessel"),
+            "voyage": _g(row, "voyage"),
+            "biz_type": _g(row, "biz_type"),
+            "supply": _g(row, "supply"),
+            "channel": _g(row, "channel"),
+            "cbm": _num(row, "cbm"),
+            "kg": _num(row, "kg"),
+            "boxes": _num(row, "boxes"),
+        }
+    return index
+
+
+def parse_packing_list_ls(xlsx_path):
+    """解析朗胜「箱货清单」xlsx，按系统SO分组，返回 {系统SO: 汇总}。
+
+    每项：products_en(去重英文品名), total_volume(长×宽×高×箱数求和, CBM),
+          total_weight(货箱重量求和), boxes(总箱数求和), country, channel。
+    朗胜箱货清单表头：系统SO / 英文品名 / 货箱重量 / 总箱数(CTN) / 长(CM) / 宽(CM) / 高(CM) / 客户渠道。
+    """
+    wb = load_workbook(xlsx_path, data_only=True, read_only=True)
+    ws = wb.worksheets[0]
+    rows = list(ws.iter_rows(values_only=True))
+    wb.close()
+
+    so_col = en_col = wt_col = box_col = len_col = wid_col = hei_col = country_col = channel_col = None
+    header_idx = None
+    for i, row in enumerate(rows[:12]):
+        if not row:
+            continue
+        for j, v in enumerate(row):
+            s = str(v).strip() if v is not None else ""
+            if s == "系统SO":
+                so_col = j
+                header_idx = i
+            elif s == "英文品名":
+                en_col = j
+            elif s == "货箱重量":
+                wt_col = j
+            elif s == "总箱数(CTN)":
+                box_col = j
+            elif s == "长(CM)":
+                len_col = j
+            elif s == "宽(CM)":
+                wid_col = j
+            elif s == "高(CM)":
+                hei_col = j
+            elif s in ("国家", "目的国"):
+                country_col = j
+            elif s == "客户渠道":
+                channel_col = j
+
+    groups = {}
+    for i, row in enumerate(rows):
+        if not row:
+            continue
+        if header_idx is not None and i <= header_idx:
+            continue
+        if so_col is None or so_col >= len(row) or not row[so_col]:
+            continue
+        so = str(row[so_col]).strip()
+        if not so:
+            continue
+        g = groups.setdefault(so, {
+            "products_en": [], "total_volume": 0.0, "total_weight": 0.0,
+            "boxes": 0, "country": None, "channel": None,
+        })
+        if country_col is not None and country_col < len(row) and row[country_col] and g["country"] is None:
+            g["country"] = str(row[country_col]).strip()
+        if channel_col is not None and channel_col < len(row) and row[channel_col] and g["channel"] is None:
+            g["channel"] = str(row[channel_col]).strip()
+        if en_col is not None and en_col < len(row) and row[en_col]:
+            e = _strip_version(str(row[en_col])).upper().replace(" ", "")
+            if e and e not in g["products_en"]:
+                g["products_en"].append(e)
+        if wt_col is not None and wt_col < len(row) and isinstance(row[wt_col], (int, float)):
+            g["total_weight"] += float(row[wt_col])
+        if box_col is not None and box_col < len(row) and isinstance(row[box_col], (int, float)):
+            g["boxes"] += int(row[box_col])
+        if None not in (len_col, wid_col, hei_col) and max(len_col, wid_col, hei_col) < len(row):
+            L, W, H = row[len_col], row[wid_col], row[hei_col]
+            B = row[box_col] if box_col is not None and box_col < len(row) and isinstance(row[box_col], (int, float)) else 1
+            if all(isinstance(x, (int, float)) for x in (L, W, H)):
+                g["total_volume"] += float(L) * float(W) * float(H) * float(B) / 1e6
+    return groups
+
+
+def ls_apply_packing(rec, folder, ls_packing, order_map):
+    """朗胜：按底单文件名里的系统SO列表匹配箱货清单 + 订单列表，回填提单字段。
+
+    - 品名：箱货清单英文品名，跨全部系统SO去重合并
+    - 总体积：箱货清单「长×宽×高×总箱数」求和（朗胜不用订单列表总CBM，那列是计费体积）
+    - 系统SO：跨全部系统SO去重
+    - 起运日期：订单列表「开船时间」（首个匹配订单行）
+    - 目的港：调用方已用 ls_detect_packing 提取；此处兜底供应渠道（美中休斯顿→HOUSTON,TX）
+    """
+    sos = _ls_sos_from_text(folder)
+    # 系统SO范围可能与其他票重叠（如「150-182」里「162-170」是独立票），按报关单件数反推本票真实子集
+    sos = _ls_filter_sos_by_boxes(sos, rec, ls_packing)
+    products = []
+    volume_sum = 0.0
+    has_volume = False
+    order_info = {}
+    for so in sos:
+        pk = ls_packing.get(so)
+        if pk:
+            for p in pk.get("products_en", []):
+                if p and p not in products:
+                    products.append(p)
+            v = pk.get("total_volume")
+            if isinstance(v, (int, float)) and v:
+                volume_sum += float(v)
+                has_volume = True
+        if not order_info and so in order_map:
+            order_info = order_map[so]
+
+    if products:
+        rec["品名"] = "\n".join(products)
+    if sos:
+        rec["系统SO"] = "\n".join(sos)
+    if has_volume:
+        rec["总体积"] = str(round(volume_sum, 4))
+
+    # 起运日期 = 订单列表开船时间
+    ship_time = (order_info.get("ship_time") or "").strip()
+    if ship_time:
+        rec["起运日期"] = ship_time
+
+    # 目的港兜底（装箱单页未识别到港口时）：
+    #   1) 报关单「指运港」中文（长滩/洛杉矶/温哥华/王子港/休斯顿，洋山港等无装箱单票用）
+    #   2) 供应渠道（美中休斯顿卡派包税 → HOUSTON,TX）
+    if not (rec.get("目的港") or "").strip():
+        cn_dest = (rec.get("_指运港_中文") or "").strip()
+        for cn, en in LS_CN_DEST_MAP.items():
+            if cn in cn_dest:
+                rec["目的港"] = en
+                rec["目的地"] = en
+                break
+    if not (rec.get("目的港") or "").strip():
+        supply = (order_info.get("supply") or "").strip() or (order_info.get("channel") or "").strip()
+        if "休斯顿" in supply:
+            rec["目的港"] = "HOUSTON,TX"
+            rec["目的地"] = "HOUSTON,TX"
+
+    # 起运地 = 离境口岸中文 → 英文（复用 port_map.origin），不碰目的港（朗胜目的港来自装箱单页）
+    cn_port = (rec.get("起运地") or "").strip()
+    if cn_port:
+        origins = load_port_map().get("origin", {}) or {}
+        if cn_port in origins:
+            rec["起运地"] = origins[cn_port]
+
+    return rec
+
+
 def parse_order_list(xlsx_path):
     """解析星速「订单列表」xlsx，返回 {基础 FBA: {country, ship_time, vessel, voyage, biz_type, so, supply, channel, cbm, kg, boxes}}。
 
@@ -755,6 +1180,8 @@ def extract_customs_data(pdf_path, customer=DEFAULT_CUSTOMER):
                 words = _ocr_page_to_words(page)
     if not words:
         return _empty_record(customer)
+    # 洋山港等报关行文字层中文字符重复两次，折叠还原后再匹配标签（见 _dedouble_cjk_text）
+    words = _dedouble_words(words)
     lines = _group_by_line(words)  # { y: [words 按 x0 排序] }
     ys = sorted(lines)
 
@@ -1528,14 +1955,15 @@ def generate_batch(tickets, bl_template, out_dir, customer=DEFAULT_CUSTOMER, roo
 
     no_telex = bool(get_customer_config(customer).get("no_telex"))
     is_xs = (customer == "星速")
+    is_ls = (customer == "朗胜")
 
     results = []
     for i, t in enumerate(tickets):
         rec = t["record"]
         folder = t.get("folder") or rec.get("提单号") or f"提单_{i+1}"
 
-        # 星速命名对齐历史提单：FBA15XXX-公司-件数-提单.pdf / -底单.pdf
-        if is_xs:
+        # 星速/朗胜命名对齐历史提单：FBA15XXX-公司-件数-提单.pdf / -底单.pdf
+        if is_xs or is_ls:
             bl_name = f"{folder}-提单"
             telex_name = ""
             ddan_name = f"{folder}-底单"
@@ -1581,10 +2009,10 @@ def generate_batch(tickets, bl_template, out_dir, customer=DEFAULT_CUSTOMER, roo
             "bl_name": safe_bl, "telex_name": safe_telex, "ddan_name": safe_ddan,
         })
 
-    # 打包 ZIP：拓锐按票建子文件夹（底单+提单+保函）；星速所有提单平铺根目录（不建子文件夹、不含底单）
+    # 打包 ZIP：拓锐按票建子文件夹（底单+提单+保函）；星速提单平铺根目录（不含底单）；朗胜提单+底单平铺根目录（不含保函）
     stamp = datetime.now().strftime("%Y%m%d%H%M%S")
     safe_root = re.sub(r'[\\/:*?"<>|]', "_", (root_folder or "").strip())
-    zip_name = f"{safe_root}系统制作文件.zip" if safe_root else (f"ETTON提单_{stamp}.zip" if is_xs else f"ETTON提单_电放保函_{stamp}.zip")
+    zip_name = f"{safe_root}系统制作文件.zip" if safe_root else (f"ETTON提单_{stamp}.zip" if (is_xs or is_ls) else f"ETTON提单_电放保函_{stamp}.zip")
     zip_path = os.path.join(out_dir, zip_name)
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         if is_xs:
@@ -1593,6 +2021,12 @@ def generate_batch(tickets, bl_template, out_dir, customer=DEFAULT_CUSTOMER, roo
                 src = r["bl_pdf"]
                 if src and os.path.isfile(src):
                     zf.write(src, arcname=os.path.basename(src))
+        elif is_ls:
+            # 朗胜：提单 + 底单（底单含装箱单）平铺根目录，不含保函
+            for r in results:
+                for src in (r["bl_pdf"], r["ddan_pdf"]):
+                    if src and os.path.isfile(src):
+                        zf.write(src, arcname=os.path.basename(src))
         else:
             for j, r in enumerate(results):
                 safe_folder = (re.sub(r'[\\/:*?"<>|]', "_", str(r.get("folder") or "")).strip()
@@ -1605,6 +2039,30 @@ def generate_batch(tickets, bl_template, out_dir, customer=DEFAULT_CUSTOMER, roo
 
 
 # ---------- 内部工具 ----------
+def _dedouble_cjk_text(s):
+    """折叠连续重复的中文字符（「离离境境口口岸岸」→「离境口岸」）。
+
+    部分报关行（上海洋山港）导出报关单的文字层会把每个中文字符重复两次，
+    3 字以上标签（离境口岸/指运港/运抵国/提运单号）因此匹配不到。仅折叠 CJK，
+    ASCII/数字（如 223120260002613782 里的 00）不受影响。
+    """
+    if not s:
+        return s
+    out = []
+    prev = ""
+    for ch in s:
+        if ch == prev and "一" <= ch <= "鿿":
+            continue
+        out.append(ch)
+        prev = ch
+    return "".join(out)
+
+
+def _dedouble_words(words):
+    """对 pdfplumber 提取的词表做中文字符去重（保留坐标，仅改 text）。"""
+    return [{**w, "text": _dedouble_cjk_text(w.get("text", ""))} for w in words]
+
+
 def _group_by_line(words):
     lines = {}
     for w in words:
@@ -1675,19 +2133,29 @@ def _container_numbers(lines):
 
     不能全文本 [A-Z]{4}\\d{7} 搜索——海运提单号（如 ZIMUNGB1391012S）也含此格式会被误匹配；
     柜号固定出现在备注行「集装箱标箱数及号码：N;XXXX1234567;」里（海运/铁路底单格式一致）。
+    兼容洋山港格式「集装箱标箱数及号码:XXXX1234567」（直接冒号+柜号，无 N; 计数）与
+    放行通知书「集装箱号：XXXX1234567」。
     """
     for words in lines.values():
         full = " ".join(w["text"] for w in words)
+        # 标准格式：集装箱标箱数及号码：N;XXXX1234567;（含柜数计数）
         m = re.search(r"集装箱标箱数及号码\s*[：:]?\s*\d+\s*[;；]", full)
-        if not m:
-            continue
-        nums = re.findall(r"[A-Z]{4}\d{7}", full[m.end():])
-        if nums:
-            seen = []
-            for n in nums:
-                if n not in seen:
-                    seen.append(n)
-            return ";".join(seen)
+        if m:
+            nums = re.findall(r"[A-Z]{4}\d{7}", full[m.end():])
+            if nums:
+                seen = []
+                for n in nums:
+                    if n not in seen:
+                        seen.append(n)
+                return ";".join(seen)
+        # 洋山港格式：集装箱标箱数及号码:XXXX1234567（冒号后直接柜号，无计数）
+        m = re.search(r"集装箱标箱数及号码\s*[：:]\s*([A-Z]{4}\d{7})", full)
+        if m:
+            return m.group(1)
+        # 放行通知书：集装箱号：XXXX1234567
+        m = re.search(r"集装箱号\s*[：:]\s*([A-Z]{4}\d{7})", full)
+        if m:
+            return m.group(1)
     return ""
 
 def _find_product_names(lines):

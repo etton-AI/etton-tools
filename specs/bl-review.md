@@ -67,6 +67,34 @@
 - **前端**：`/bl-review` 选「星速」后，上传区把「周汇总箱货清单」换成「箱货清单」+ 新增「订单列表」入口，隐藏「物流追踪表」；每个 PDF 独立成一票（按文件名里的 FBA 号分组，xlsx 忽略）；保函预览/生成按钮隐藏。客户选择持久化到 `localStorage`（刷新不重置回拓锐）；星速目录上传时 `File.name` 可能带相对路径前缀（如 `7月底单/xxx.pdf`），先 `split("/").pop()` 取纯文件名再归组。
 - 依赖：`requirements.txt` 新增 `pypinyin>=0.51`。
 
+## 朗胜(LSGKJ) 客户（美加 FBA 海运，底单强制装箱单）
+
+- 加客户只需在 `core.py` 的 `CUSTOMERS` 里加 `"朗胜"` 一项；字段如下：
+  - `shipper_bl` = 固定 `SHENZHENSHILANZHONGDIANZIYOUXIANGONGSI` + 深圳地址 7 行（深圳市览众电子有限公司拼音）。
+  - `consignee_bl` = `LONG SUN TECHNOLOGY CO., LIMITED` + `1150 N Del Rio Pl, Ontario, CA91764`。
+  - `no_telex = True` → 不出电放保函；ZIP 含 `{folder}-提单.pdf` + `{folder}-底单.pdf`（底单含装箱单）平铺根目录，无保函（与星速差异：星速 ZIP 不含底单，朗胜**必须含底单**）。
+  - **提单模板**：与拓锐/星速共用同一 `提单模板.docx` 邮件合并模板（`fill_bl_docx`），notify 由模板静态文字 `SAME AS CONSIGNEE` 呈现。
+- **强制装箱单**：朗胜底单必须含「装箱单」（报关底单最后一页集装箱装箱单「联单」页）。`ls_detect_packing(pdf_path)` 遍历 PDF 各页文本，命中「联单」/「纸板箱」/「装货单」/「SHIPPING ORDER」任一关键词即判有装箱单；无装箱单则 `warning`「缺装箱单（朗胜底单须含装箱单联单页）」**仅提醒不阻断**。
+  - **实测坑**：①部分报关系统 PDF 中文文本层乱码（`纸板箱`→`ֽ����`），中文关键词失效，故以**港口代码/英文目的港命中**（ASCII，不受乱码影响）作为「有装箱单」的可靠标志——朗胜装箱单页必含港口代码；②`pdfplumber` 页对象在 `with` 块外 `extract_text()` 会 `seek of closed file`，必须在 `with` 块内遍历。装货单格式（SHIPPING ORDER）的目的港有时只写 `United States`（无具体港口）→ 留空兜底供应渠道或人工填；③**洋山港格式**：部分洋山港报关行文字层中文字符**重复两次**（`离境口岸`→`离离境境口口岸岸`），直接匹配会失效，`extract_customs_data` 在分组前先 `_dedouble_words()` 折叠（**只折叠 CJK，不动 ASCII/数字**，否则柜号 `223120260002613782` 会被误折叠成 `00`）。
+- **目的港从装箱单页提取**（5 个美加港口），装箱单页两种写法都要识别：
+
+| 港口代码（老格式） | 英文目的港（新格式，去空格匹配） | 提单目的港 |
+|---|---|---|
+| `USHOU` | `HOUSTON` | `HOUSTON,TX` |
+| `USLGB` | `LONG BEACH` | `LONGBEACH,CA` |
+| `USLAX` | `LOS ANGELES` | `LOSANGELES,CA` |
+| `USVAN` | `VANCOUVER` | `VANCOUVER,BC` |
+| `CAPRR` | `PRINCE RUPERT` | `PRINCERUPERT,BC` |
+
+  - 识别不到留空，兜底按供应渠道「休斯顿」→`HOUSTON,TX`，其余人工填。
+- **系统SO 匹配**：朗胜一票 = 多个系统SO（`LSGKJ`+YYMM+NNNN，如 `LSGKJ26050001`），通过底单文件名里的系统SO列表关联订单列表/箱货清单。文件名四种写法：完整 SO（`LSGKJ26050001`）、完整范围（`LSGKJ26050001-LSGKJ26050008`）、范围缩写（`LSGKJ26060041-50`）、单缩写（`LSGKJ26050118+119+68`，序号小于前一序号时进位补百位）。`_ls_sos_from_text()` 统一解析；`parse_order_list_ls`/`parse_packing_list_ls` 按系统SO（非 FBA）索引/分组。
+- **系统SO 范围重叠消歧**：文件名范围（如 `150-182`）可能**过度包含**本不属于该票的系统SO（如另开的一票 `162-170`，其箱数/毛重也一并被计入）。`_ls_filter_sos_by_boxes(sos, rec, ls_packing)` 用报关单「件数」（`rec['箱数']`）反推：把排序后的 SO 逐段连续尝试，若「总箱数减去某连续段」恰好等于报关单件数，则该段是被误纳的异票 SO、予以剔除；件数相同时再用报关单「毛重」在候选段里挑误差最小者消歧（实测 150-182 因含 162-170 的 645 件，被正确剔成 24 个 SO、912 件、体积 32.4003 ≈ 答案 32.414）。
+- **体积关键坑（与星速相反）**：朗胜体积 = 箱货清单「长×宽×高×总箱数」求和（`parse_packing_list_ls` 的 `total_volume`），**不用订单列表「总CBM」**（那列是计费体积，实测 47.5483 长宽高求和 vs 订单列表 52.71 不匹配）。星速 #85 用订单列表总CBM，两客户相反勿混淆。
+- **品名** = 箱货清单英文品名去版本号 + 去空格 + 大写（`LED LIGHT` → `LEDLIGHT`，同星速）。
+- **起运日期** = 订单列表「开船时间」；**船名航次** = 报关底单「运输工具名称及航次号」（朗胜订单列表船名/船次常为空，不覆盖）；**起运地** = 离境口岸查 `port_map.json` 的 `origin`（已补 `蛇口→SHEKOU`、`上海→SHANGHAI`、`洋山港/洋山港区→SHANGHAI`）；**目的港** 识别不到装箱单页港口时，先用报关底单「指运港」中文兜底 `LS_CN_DEST_MAP`（`长滩→LONGBEACH,CA` / `洛杉矶→LOSANGELES,CA` / `休斯顿→HOUSTON,TX` / `温哥华→VANCOUVER,BC` / `王子港→PRINCERUPERT,BC`），仍未命中再按供应渠道「休斯顿」兜底，最后留空人工填。
+- **前端**：`/bl-review` 选「朗胜」后走星速同款布局（「箱货清单」+「订单列表」入口、隐藏「物流追踪表」、每 PDF 独立成一票），但提示文案补充「底单须含装箱单，缺装箱单上传提醒；目的港从装箱单页提取」；生成按钮/ZIP 文案为「提单 + 底单」。
+- **不参与记忆回写**：朗胜目的港用专用港口代码映射（`LS_PORT_CODE_MAP`/`LS_DEST_EN_MAP`），不走 `remember_ports`/`remember_channels`（`api_generate` 判断 `customer not in ("星速", "朗胜")`）。
+
 ## 箱货清单汇总（品名英文 + 总体积）
 
 - `parse_packing_list(xlsx)` 定位「系统SO/英文品名/中文品名/体积/货箱重量/FBA ID/客户渠道」表头（跳过表头行），系统SO 去重供审核表展示（方便查找），英文品名去版本号 + 去重（全大写）覆盖「品名」，体积列求和覆盖「总体积」，FBA ID 去重供物流追踪表匹配，客户渠道取首个非空值供目的港映射。

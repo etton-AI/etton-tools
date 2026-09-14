@@ -1,7 +1,11 @@
 {
   "origin": {
     "外高桥": "SHANGHAI",
+    "上海": "SHANGHAI",
+    "洋山港": "SHANGHAI",
+    "洋山港区": "SHANGHAI",
     "盐田": "YANTIAN",
+    "蛇口": "SHEKOU",
     "宁波北仑港港区": "NINGBO",
     "南沙港一期码头": "NANSHA",
     "烟台港": "YANTAI"
