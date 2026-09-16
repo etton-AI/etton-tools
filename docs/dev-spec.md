@@ -1235,6 +1235,23 @@ interface PacificSplitResult {
       5. **系统SO 范围重叠**：`LSGKJ26050150-LSGKJ26050182` 文件名展开 33 个 SO，但本票只含 150-161+171-182（24 个 SO，912 件），中间 `162-170`（9 个 SO，645 件）是独立票（`LSGKJ26050162-LSGKJ26050170`），导致体积从 32.41 虚高到 61.20。修复：`_ls_filter_sos_by_boxes` 用报关单「件数」校验展开 SO 的箱数总和，不等时去掉一个连续子区间使剩余箱数=件数；箱数可能多解（158-167 与 162-170 都是 645 箱），再用报关单「毛重」从候选中挑最接近者消歧（正确子集剩余毛重 5349.37 最接近 5347.52）。
     - 位置：`bl-service/core.py`（`CUSTOMERS["朗胜"]`/`LS_PORT_CODE_MAP`/`LS_DEST_EN_MAP`/`LS_CN_DEST_MAP`/`ls_detect_packing`/`_ls_sos_from_text`/`_ls_filter_sos_by_boxes`/`parse_order_list_ls`/`parse_packing_list_ls`/`ls_apply_packing`/`_dedouble_cjk_text`/`_dedouble_words`/`generate_batch`）、`bl-service/review_app.py`（extract-batch/generate 朗胜分支）、`bl-service/port_map.json`（origin 补蛇口/上海/洋山港）、`src/app/bl-review/page.tsx`
 
+89. **新增「跨境堡批量投保」：系统货箱清单按 SO 聚合填充跨境堡箱单模板** (2026-09-16)
+    - 功能入口 `/kuajingbao-insurance`：上传系统导出的货箱清单，按「系统SO」聚合生成 36 列投保数据。核心 4 字段按真实填好的模板示例逐格反推得出，与需求 docx 粗略示例不同：
+      1. **货物描述** = `中文品名+申报总数量PCS`（多品名以「、」连接，`PCS` 大写），如 `氛围灯+336PCS`——不是 docx 示例的 `夜灯64pcs+氛围灯64pcs`（`pcs` 小写 + `+` 连接）。
+      2. **备注（仅「全美锁仓」渠道）** 精确文案：`本保单承保AGL（亚马逊物流）承运的物流运输服务，其亚马逊货件建仓地址为“${仓库代码}”，投保的目的地为“${仓库代码}”，同时存在最后FBA调仓可能${仓库代码}`——前两处仓库代码用中文全角引号 `“”` 包裹，第三处不加引号。
+      3. **入仓编号** = FBA ID 去掉末尾 `U+6 位数字` 箱序后缀（如 `FBA19MXX2JCWU260101` → `FBA19MXX2JCW`）。
+      4. **全美锁仓触发条件** = 客户渠道含「全美」字眼（样例渠道 `FBA全美26日达快线`/`FBA全美36日达`）。
+    - **系统SO 需向下填充**：货箱清单里「系统SO」仅每组首行有值，续行为空，解析时用 `currentSo` 向下填充；且「中文品名」续行可能为空，空品名跳过不累加（避免续行空品名误计）。
+    - **模板结构**：主 sheet「批量导入投保数据」R1=表头、R2=说明、R3 起数据（示例 R3~R45，空行 R46~499），36 列。
+    - **模板数据验证含 `:1048576` 整列范围 → exceljs `readFile` 卡死**：模板 31 条数据验证里多数 sqref 是 `B2:B1048576` 之类的整列范围（sheet 实际 dimension 只有 `A1:AJ499`），exceljs 解析时会展开整列导致 `readFile` 挂起。**修复**：预处理模板时把 `<dataValidations>` 块内的 `1048576` 统一替换为 `499`（sheet 实际最大行），只改 sheet1.xml 其余字节保留。位置：模板 `public/templates/跨境堡批量投保箱单模版.xlsx`（已 clamp）。
+    - **R36「投保金额」整列共享公式**：模板 AJ3:AJ499 预填共享公式 `ROUND(AH{n},2)*AI{n}`（分 8 段 si=0~7，空行缓存 0）。清空前必须 `flattenFormulas()` 展平（共享主格→普通公式、从格→只留 result），否则残留共享公式引用。
+    - **清空数据区用逐格置 null，不用 `spliceRows`**：`spliceRows(3, N)` 删除含公式的行会残留主格（exceljs 行位移 bug，实测 R65/129/…449 残留公式）。改为展平后 `for r=3..rowCount for c=1..36 getCell(c).value=null` 逐格置空，再写入自己的数据。写完后 `actualRowCount` = 数据行数（空行不落盘）。
+    - **起运日期用 `Date.UTC` 构造**：exceljs `dateToExcel` 直接用 `d.getTime()`（UTC 时基）不做时区修正，`new Date(y,m-1,d)`（本地午夜）在东八区会少一天。用 `new Date(Date.UTC(y,m-1,d))` 才写出正确日期（实测 Sep20 正确）。
+    - **公式串不带前导 `=`**：exceljs 读回 `<f>ROUND(...)</f>` 得到 `formula:"ROUND(...)"`（无 `=`），写回时 `model.formula` 原样进 `<f>`。若写 `"=ROUND(...)"` 会在 `<f>` 里多一个 `=`，openpyxl 读回变 `==ROUND(...)`。
+    - **数字格式由模板列样式提供**：货值(34)`0.00_);[Red](0.00)`、加成比例(35)`0.00%`、投保金额(36)`0.00_);[Red](0.00)` 都是列级样式，逐格置 null 后仍保留，无需也不能用 `numFmt` 覆盖（加成比例=1 配 `0.00%` 显示为 100%）。
+    - **常量**：被保险人=易通科技物流（中山）有限公司、类型=企业、起运国=中国、赔付地=HANGZHOU CHINA、目的地类型=FBA、上架保障=保上架、加成比例=1；币种代码→中文映射 `CURRENCY_MAP`（USD→美元 等）。
+    - 位置：`src/lib/kuajingbao-insurance.ts`、`src/app/api/kuajingbao-insurance/route.ts`、`src/app/kuajingbao-insurance/page.tsx`、`public/templates/跨境堡批量投保箱单模版.xlsx`；首页 `src/app/page.tsx` 工具数「九款→十款」
+
 ### 待重构项
 
 - [ ] 将 session 存储从内存 Map 改为临时文件或 Redis

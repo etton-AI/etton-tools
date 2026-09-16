@@ -125,6 +125,21 @@ const TOOLS: Tool[] = [
       </svg>
     ),
   },
+  {
+    href: "/kuajingbao-insurance",
+    title: "跨境堡批量投保",
+    badge: "高效",
+    desc: "货箱清单按 SO 生成货物描述、货值、币种与备注",
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 2 2 7l10 5 10-5-10-5Z" />
+        <path d="M2 17h20" />
+        <path d="M2 21h20" />
+        <path d="M4 7v10" />
+        <path d="M20 7v10" />
+      </svg>
+    ),
+  },
 ];
 
 export default function HomePage() {
@@ -146,7 +161,7 @@ export default function HomePage() {
         </h1>
         <div className="scanline" />
         <p className="mt-6 text-[17px] tracking-[.5px] text-muted">
-          九款电商效率工具，把繁琐的表格处理变成一次点击。
+          十款电商效率工具，把繁琐的表格处理变成一次点击。
         </p>
       </section>
 
