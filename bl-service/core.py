@@ -870,7 +870,7 @@ def parse_packing_list_ls(xlsx_path):
         if channel_col is not None and channel_col < len(row) and row[channel_col] and g["channel"] is None:
             g["channel"] = str(row[channel_col]).strip()
         if en_col is not None and en_col < len(row) and row[en_col]:
-            e = _strip_version(str(row[en_col])).upper().replace(" ", "")
+            e = _strip_version(str(row[en_col])).upper()
             if e and e not in g["products_en"]:
                 g["products_en"].append(e)
         if wt_col is not None and wt_col < len(row) and isinstance(row[wt_col], (int, float)):
@@ -1085,7 +1085,7 @@ def parse_packing_list_xs(xlsx_path):
         if channel_col is not None and channel_col < len(row) and row[channel_col] and g["channel"] is None:
             g["channel"] = str(row[channel_col]).strip()
         if en_col is not None and en_col < len(row) and row[en_col]:
-            e = _strip_version(str(row[en_col])).upper().replace(" ", "")
+            e = _strip_version(str(row[en_col])).upper()
             if e and e not in g["products_en"]:
                 g["products_en"].append(e)
         if wt_col is not None and wt_col < len(row) and isinstance(row[wt_col], (int, float)):

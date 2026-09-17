@@ -1252,6 +1252,14 @@ interface PacificSplitResult {
     - **常量**：被保险人=易通科技物流（中山）有限公司、类型=企业、起运国=中国、赔付地=HANGZHOU CHINA、目的地类型=FBA、上架保障=保上架、加成比例=1；币种代码→中文映射 `CURRENCY_MAP`（USD→美元 等）。
     - 位置：`src/lib/kuajingbao-insurance.ts`、`src/app/api/kuajingbao-insurance/route.ts`、`src/app/kuajingbao-insurance/page.tsx`、`public/templates/跨境堡批量投保箱单模版.xlsx`；首页 `src/app/page.tsx` 工具数「九款→十款」
 
+90. **朗胜提单 PDF 与正确答案比对后修复 3 处格式 bug** (2026-09-17)
+    - 对照 `正确LSGKJ26060036+37+39+40--提单184件.pdf` 逐项比对系统输出，修了 3 处（两处在模板 `bl-service/提单模板.docx`，一处在代码 `bl-service/core.py`）：
+      1. **shipper 显示不全（丢末行 CHINA）**：朗胜固定发货人 7 行地址在 9pt 单倍行距下总高 ~75.6pt，超过 shipper 文本框可用高 ~59pt（文本框 `cy=842010` EMU=66.3pt，`tIns/bIns=45720`=3.6pt），LibreOffice 对固定文本框裁剪溢出 → 末行 `CHINA` 被吞。**修复**：模板 shipper 文本框字号 `w:sz 18→16`（9pt→8pt）+ 段落加精确行距 `<w:spacing w:line="160" w:lineRule="exact"/>`（8pt），7 行总高 56pt 稳定放得下；`fill_bl_docx` 的 `docx-mailmerge` 拆分多行 `\n` 到 `w:br` 时保留 run 的 rPr，字号/行距跟着生效。
+      2. **`CFS TO CFS` / 品名跑偏（不在 Description of Goods 列下）**：模板「CFS TO CFS + 品名」文本框 `wp:docPr id=131629563` 原用 `<wp:positionH relativeFrom="margin"><wp:align>center</wp:align>`，中心对齐后文本落到 x≈185pt（「箱数」列附近）。**修复**：改 `<wp:positionH relativeFrom="column"><wp:posOffset>2282190</wp:posOffset>`（179.7pt），配合文本原点 43.3pt 使 x≈223pt，正好落在 Description of Goods 列（正确答案 x0≈222.96）。
+      3. **`LEDLIGHT` 中间丢空格（应为 `LED LIGHT`）**：`parse_packing_list_ls`（朗胜）/`parse_packing_list_xs`（星速）对英文品名多做了一次 `.replace(" ", "")` 连写，把源数据 `LED LIGHT` 压成 `LEDLIGHT`。**修复**：去掉这两处的 `.replace(" ", "")`（`core.py` 873/1088 行），与拓锐 `parse_packing_list` 保持一致——英文品名只去版本号 + 大写，**保留空格**（`LED LIGHT`/`V CONNECTOR`/`POWER CORD` 原样）。⚠️ 源数据里 `LED LIHGT` 的拼写错误照抄（非 bug，源文件本身如此）。
+    - **模板改用 lxml 直改 + zipfile 重写**（非 WPS/Word 手改），改前先 `shutil.copyfile` 备份；修改时注意 `zipfile.ZipFile(..., "w")` 会立即截断源文件，必须先 `read()` 全部 entry 到内存再写回（否则 `ValueError: ZIP archive that was already closed` 且源文件被清空成 22 字节）。
+    - 位置：`bl-service/core.py`、`bl-service/提单模板.docx`
+
 ### 待重构项
 
 - [ ] 将 session 存储从内存 Map 改为临时文件或 Redis
