@@ -285,7 +285,9 @@ function parseCargoList(ws: ExcelJS.Worksheet): SoGroup[] {
         currency: currencyToCn(cellText(ws.getCell(r, col.currency))),
         totalValue: 0,
         totalBoxes: 0,
-        totalWeight: 0,
+        // 货箱重量是「每 SO 合并单元格」的总额（续行不重复），只取首行一次；
+        // 若放进逐行累加，ExcelJS 会把合并格的值在合并区每行都读到 → 总公斤数被乘 N 倍。
+        totalWeight: cellNum(ws.getCell(r, col.boxWeight)),
         remark: "",
       });
     }
@@ -298,10 +300,9 @@ function parseCargoList(ws: ExcelJS.Worksheet): SoGroup[] {
       qtyMap.set(nameCh, (qtyMap.get(nameCh) || 0) + qty);
     }
 
-    // 数值聚合
+    // 数值聚合（总申报货值/总箱数 为逐行值，逐行累加；货箱重量已在建组时取一次，勿重复累加）
     g.totalValue += cellNum(ws.getCell(r, col.declaredValue));
     g.totalBoxes += cellNum(ws.getCell(r, col.boxCount));
-    g.totalWeight += cellNum(ws.getCell(r, col.boxWeight));
 
     // 入仓编号：首个 FBA ID 去掉箱序后缀（U+6 位数字）
     if (!g.fbaBase) {
@@ -330,11 +331,13 @@ function parseCargoList(ws: ExcelJS.Worksheet): SoGroup[] {
     g.totalValue = round2(g.totalValue);
     g.totalWeight = round2(g.totalWeight);
     // 备注：仅「全美锁仓」渠道（客户渠道含「全美」）
+    // 仓库代码只出现在「建仓地址为“X”」「投保的目的地为“X”」两处，
+    // 结尾「同时存在最后FBA调仓可能」后面不带仓库代码。
     if (g.channel.includes("全美")) {
       const code = g.warehouseCode;
       g.remark =
         `本保单承保AGL（亚马逊物流）承运的物流运输服务，其亚马逊货件建仓地址为“${code}”，` +
-        `投保的目的地为“${code}”，同时存在最后FBA调仓可能${code}`;
+        `投保的目的地为“${code}”，同时存在最后FBA调仓可能`;
     }
   }
 
