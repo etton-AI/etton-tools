@@ -1267,6 +1267,12 @@ interface PacificSplitResult {
     - **ExcelJS 合并格坑**：读 `.xlsx` 时合并单元格的值会被复制到合并区内每一行（openpyxl 只放主格、其余 None，两者行为不同）——凡「每 SO 合并」的列（如货箱重量）必须只取一次，不能逐行累加。
     - 位置：`src/lib/kuajingbao-insurance.ts`（`parseCargoList` 建组块 + `remark` 生成）
 
+92. **跨境堡批量投保：入仓编号合并该票全部 FBA + 350 字符截断** (2026-09-29)
+    - 症状：同一票（系统SO）有多个 FBA 号时，旧代码只取「首个 FBA ID」填入仓编号（`if (!g.fbaBase)`），其余 FBA 全部丢失。实测 `箱货清单-TRKJ26090132.xlsx` 11 票里 8 票含多 FBA（最多 10 个，如 `TRKJ26090121`/`TRKJ26090122`），旧输出每票只剩 1 个 FBA。
+    - **修复**：`parseCargoList` 收集该票全部 FBA ID（去箱序后缀 `U+6 位数字` + 去重 + 保持出现顺序，存入 `g.fbaList`），收尾阶段用空格连接成入仓编号。⚠️ FBA ID 列混入过非 FBA 值（如 `STAR-SBCVDCB3G5W5E`，属源数据异常，原样透传不做特殊处理）。
+    - **字数上限 350（含分隔符）**：入仓编号超限时按「完整 FBA 号」为单位截断——从第一个 FBA 逐个累加，一旦加入下一个超过 350 就停止，溢出部分整段挪到备注（`入仓编号超出350字符，多余FBA：{FBA} {FBA} …`），**绝不把单个 FBA 号从中间拆成两半**。备注 = 全美锁仓说明（若有）+ 溢出 FBA（若有），两者以「；」连接。
+    - 位置：`src/lib/kuajingbao-insurance.ts`（`SoGroup.fbaList` + `parseCargoList` 收集/收尾截断 + `remark` 合并）
+
 ### 待重构项
 
 - [ ] 将 session 存储从内存 Map 改为临时文件或 Redis

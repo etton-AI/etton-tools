@@ -47,14 +47,15 @@ export interface SoGroup {
   workOrder: string;       // 工作号（仅用于展示/排查）
   country: string;         // 国家 → 目的国
   warehouseCode: string;   // 仓库代码 → 目的地
-  fbaBase: string;         // FBA ID 去箱序 → 入仓编号
+  fbaList: string[];       // 该票全部 FBA 号（去箱序后缀、去重、保持出现顺序）
+  fbaBase: string;         // 入仓编号（fbaList 以空格连接，≤350 字符；超出部分见 remark）
   channel: string;         // 客户渠道（判断是否全美锁仓）
   goodsDescription: string;// 货物描述
   currency: string;        // 币种（中文）
   totalValue: number;      // 货值
   totalBoxes: number;      // 总包装数量
   totalWeight: number;     // 总公斤数
-  remark: string;          // 备注（非全美锁仓为空）
+  remark: string;          // 备注（全美锁仓说明 + 入仓编号溢出的多余 FBA）
 }
 
 export interface KuajingbaoResult {
@@ -86,6 +87,12 @@ interface CargoColumnMap {
 
 /** 跨境堡模板主 sheet 名 */
 const TEMPLATE_SHEET = "批量导入投保数据";
+
+/** 入仓编号字数上限（含分隔符）；超出部分按「完整 FBA 号」为单位挪到备注，绝不截断单个 FBA */
+const FBA_FIELD_LIMIT = 350;
+
+/** 多个 FBA 号之间的分隔符（空格） */
+const FBA_SEP = " ";
 
 /** 模板内置常量（与示例数据一致） */
 const INSURED = "易通科技物流（中山）有限公司";
@@ -279,6 +286,7 @@ function parseCargoList(ws: ExcelJS.Worksheet): SoGroup[] {
         workOrder: cellText(ws.getCell(r, col.workOrder)),
         country: cellText(ws.getCell(r, col.country)),
         warehouseCode: cellText(ws.getCell(r, col.warehouseCode)),
+        fbaList: [],
         fbaBase: "",
         channel: cellText(ws.getCell(r, col.channel)),
         goodsDescription: "",
@@ -304,9 +312,10 @@ function parseCargoList(ws: ExcelJS.Worksheet): SoGroup[] {
     g.totalValue += cellNum(ws.getCell(r, col.declaredValue));
     g.totalBoxes += cellNum(ws.getCell(r, col.boxCount));
 
-    // 入仓编号：首个 FBA ID 去掉箱序后缀（U+6 位数字）
-    if (!g.fbaBase) {
-      g.fbaBase = cellText(ws.getCell(r, col.fbaId)).replace(/U\d{6}$/, "");
+    // 入仓编号：收集该票全部 FBA ID（去箱序后缀 U+6 位数字，去重，保持首次出现顺序）
+    const fbaId = cellText(ws.getCell(r, col.fbaId)).replace(/U\d{6}$/, "").trim();
+    if (fbaId && !g.fbaList.includes(fbaId)) {
+      g.fbaList.push(fbaId);
     }
 
     // 币种/渠道：取非空值兜底
@@ -320,8 +329,24 @@ function parseCargoList(ws: ExcelJS.Worksheet): SoGroup[] {
     throw new Error("货箱清单中未找到有效的 SO 数据行。");
   }
 
-  // 收尾：生成货物描述 / 备注 / 四舍五入货值
+  // 收尾：生成入仓编号（FBA 合并 + 350 截断）/ 货物描述 / 备注 / 四舍五入货值
   for (const g of groups) {
+    // 入仓编号：全部 FBA 号以空格连接，限 350 字符（含分隔符）；
+    // 按「完整 FBA 号」为单位截断，溢出部分（多余 FBA 号）整段挪到备注，绝不把单个 FBA 号从中间拆开。
+    let fbaBase = "";
+    let overflowFbas: string[] = [];
+    for (let i = 0; i < g.fbaList.length; i++) {
+      const f = g.fbaList[i];
+      const candidate = fbaBase ? fbaBase + FBA_SEP + f : f;
+      if (candidate.length <= FBA_FIELD_LIMIT) {
+        fbaBase = candidate;
+      } else {
+        overflowFbas = g.fbaList.slice(i);
+        break;
+      }
+    }
+    g.fbaBase = fbaBase;
+
     const qtyMap = qtyBySo.get(g.so)!;
     const parts: string[] = [];
     for (const [name, q] of qtyMap) {
@@ -330,15 +355,23 @@ function parseCargoList(ws: ExcelJS.Worksheet): SoGroup[] {
     g.goodsDescription = parts.join("、");
     g.totalValue = round2(g.totalValue);
     g.totalWeight = round2(g.totalWeight);
-    // 备注：仅「全美锁仓」渠道（客户渠道含「全美」）
+
+    // 备注 = 全美锁仓说明（若有）+ 入仓编号溢出的多余 FBA（若有）
+    const remarkParts: string[] = [];
+    // 仅「全美锁仓」渠道（客户渠道含「全美」）：
     // 仓库代码只出现在「建仓地址为“X”」「投保的目的地为“X”」两处，
     // 结尾「同时存在最后FBA调仓可能」后面不带仓库代码。
     if (g.channel.includes("全美")) {
       const code = g.warehouseCode;
-      g.remark =
+      remarkParts.push(
         `本保单承保AGL（亚马逊物流）承运的物流运输服务，其亚马逊货件建仓地址为“${code}”，` +
-        `投保的目的地为“${code}”，同时存在最后FBA调仓可能`;
+        `投保的目的地为“${code}”，同时存在最后FBA调仓可能`
+      );
     }
+    if (overflowFbas.length > 0) {
+      remarkParts.push(`入仓编号超出${FBA_FIELD_LIMIT}字符，多余FBA：${overflowFbas.join(FBA_SEP)}`);
+    }
+    g.remark = remarkParts.join("；");
   }
 
   return groups;
