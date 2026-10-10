@@ -2413,47 +2413,234 @@ def parse_packing_list_weekly(xlsx_path):
     return [g for g in groups.values()]
 
 
-def match_weekly_packing(record, workgroups):
+# ---------- 拓锐：箱货清单「客户渠道」→ 运输方式大类（用于匹配消歧） ----------
+# 报关单「运输方式」是 航空/铁路/公路/水路；箱货清单「客户渠道」是另一套命名。
+# 匹配出现歧义（如英国 8 箱有「空派」与「快铁」两组，毛重又完全相同）时用二者互译消歧。
+_AIR_CHANNEL_KW = ("空派", "联邦", "DHL", "UPS", "FEDEX", "红单")
+_RAIL_CHANNEL_KW = ("铁路", "快铁", "铁派")
+_ROAD_CHANNEL_KW = ("卡航",)
+_SEA_CHANNEL_KW = ("海运", "海派", "美森", "美转加", "以星", "合德", "日达", "OA船")
+
+
+def _channel_mode(channel):
+    """客户渠道名 → 运输方式大类（航空/铁路/公路/水路/None）。
+
+    优先级：航空（空派/联邦/DHL 等）→ 公路（卡航）→ 铁路（铁路/快铁/铁派）→ 水路。
+    兜底：无明确关键词但含「卡派」时判水路（拓锐数据里不带铁路/卡航的「卡派」= 美/加海运）。
+    """
+    ch = (channel or "").strip()
+    if not ch:
+        return None
+    if any(k in ch for k in _AIR_CHANNEL_KW):
+        return "航空运输"
+    if any(k in ch for k in _ROAD_CHANNEL_KW):
+        return "公路运输"
+    if any(k in ch for k in _RAIL_CHANNEL_KW):
+        return "铁路运输"
+    if any(k in ch for k in _SEA_CHANNEL_KW):
+        return "水路运输"
+    if "卡派" in ch:
+        return "水路运输"
+    return None
+
+
+def _norm_country(c):
+    """运抵国 / 箱货清单国家 → 规范国名（去括号代码/空白，兼容常见别名）。"""
+    c = re.sub(r"[\(（][^)）]*[\)）]", "", (c or "")).strip()
+    return {
+        "德意志联邦共和国": "德国", "大不列颠": "英国", "美利坚合众国": "美国",
+        "法兰西": "法国", "大韩民国": "韩国",
+    }.get(c, c)
+
+
+def _trkj_from_names(names):
+    """从 PDF 文件名列表提取全部 TRKJ 号（如「TRKJ26080004+TRKJ26080005」→ 两个）。返回 set。"""
+    out = set()
+    for n in names or []:
+        for m in re.finditer(r"TRKJ\d{6,}", str(n)):
+            out.add(m.group(0))
+    return out
+
+
+def _parse_week(folder):
+    """从上传文件夹名提取周次（如「8月第3周-…」→ 3）。找不到返回 None。"""
+    m = re.search(r"第\s*([一二三四五六七八九十]|\d+)\s*周", folder or "")
+    if not m:
+        return None
+    s = m.group(1)
+    cn = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+    if s in cn:
+        return cn[s]
+    try:
+        return int(s)
+    except ValueError:
+        return None
+
+
+def _trkj_num(so):
+    """「TRKJ26080009」→ 26080009（用于比较周次先后）。非 TRKJ 号返回 0。"""
+    so = (so or "").strip()
+    m = re.match(r"TRKJ(\d+)", so)
+    return int(m.group(1)) if m else 0
+
+
+def _week_bounds(ticket_infos, workgroups):
+    """从各票「文件夹名周次 + PDF 文件名里的 TRKJ」推导每周的 TRKJ 闭区间。
+
+    ticket_infos: list[(folder, set(trkj_strings))]；workgroups: 整月箱货清单全部工作号。
+    规则：第 N 周上界 = 第 N 周引用到的最大 TRKJ 号；首周下界、末周上界取箱货清单的 TRKJ 极值。
+    返回 {week_int: (lo, hi)}，用于整月清单时把匹配限定在「同一工作周」内，防止跨周凑和。
+    """
+    week_max = {}
+    for folder, trkjs in ticket_infos:
+        wk = _parse_week(folder)
+        if wk is None:
+            continue
+        nums = [_trkj_num(t) for t in trkjs if _trkj_num(t)]
+        if nums:
+            week_max[wk] = max(week_max.get(wk, 0), max(nums))
+    if not week_max:
+        return {}
+    all_nums = sorted(_trkj_num(g.get("so")) for g in workgroups if _trkj_num(g.get("so")))
+    lo_all = all_nums[0] if all_nums else 1
+    hi_all = all_nums[-1] if all_nums else 1
+    weeks = sorted(week_max)
+    bounds = {}
+    for i, wk in enumerate(weeks):
+        this_lo = lo_all if i == 0 else week_max[weeks[i - 1]] + 1
+        this_hi = hi_all if i == len(weeks) - 1 else week_max[wk]
+        bounds[wk] = (this_lo, this_hi)
+    return bounds
+
+
+def match_weekly_packing(record, workgroups, trkj_hint=None, trkj_range=None):
     """把一张报关底单 record 匹配到周汇总箱货清单的若干工作号，返回合并后的箱货清单 dict。
 
-    匹配键：运抵国 + 件数(箱数) + 毛重（容差 1.0kg）。返回 None 表示匹配失败
-    （扫描件无文字层 / 字段缺失 / 凑不出箱数+重量组合）。
+    匹配键（按优先级）：
+      1) PDF 文件名里的 TRKJ 号（唯一确定，文件名是权威，不依赖国家/箱数提取）
+      2) 工作周（trkj_range）——整月清单时限定同一工作周，防止跨周凑和
+      3) 运抵国 + 箱数（箱数精确命中或子集凑和，合并报关一票 = 多工作号）
+      4) 子集凑和时按「精确客户渠道」分组——同一票报关对应同一客户渠道，组内再凑箱数，
+         海运整柜再叠加「货箱重量 == 报关毛重」联合约束（海运货箱重量精确、铁路/空派含托盘会偏）
+    不再用毛重做全局硬匹配——箱货清单「货箱重量」不含托盘/外包装，与报关单「毛重」系统性偏差
+    （69 箱票差 77kg、12 箱票差 4kg），1kg 容差几乎全漏，且会回溯凑出错误的工作号组合。
+    返回 None 表示匹配失败（扫描件无文字层 / 字段缺失 / 凑不出箱数组合）。
     返回结构兼容 parse_packing_list（products_en/total_volume/total_weight/total_boxes/fba_ids/channel/country）。
     """
-    ctry = (record.get("运抵国") or "").strip()
     boxes = _to_int(record.get("箱数"))
-    weight = _to_float(record.get("总重量"))
-    if not ctry or boxes is None or weight is None:
+    ctry = _norm_country(record.get("运抵国"))
+
+    # 1) TRKJ 文件名提示：直接按系统SO 定位，命中即采用
+    if trkj_hint:
+        hinted = [g for g in workgroups if (g.get("so") or "") in trkj_hint]
+        if hinted:
+            return _merge_workgroups(hinted)
+        # 文件名明确写了 TRKJ 号，但箱货清单里没有该号 → 箱货清单不是本票对应的那一份（周份不符），
+        # 直接判匹配失败，避免退回箱数凑和凑出错误的工作号
         return None
 
-    cands = [g for g in workgroups if (g.get("country") or "").strip() == ctry]
+    if not ctry or boxes is None:
+        return None
+
+    # 2) 周次约束：同一票只匹配「同一工作周」的工作号（整月清单时关键，防止跨周凑和出错误组合）
+    if trkj_range:
+        lo, hi = trkj_range
+        workgroups = [g for g in workgroups if lo <= _trkj_num(g.get("so")) <= hi]
+
+    cands = [g for g in workgroups if _norm_country(g.get("country")) == ctry]
     if not cands:
         return None
-    # 先试单工作号直接命中（常见一票 = 一工作号）
+
+    # 2) 单工作号精确命中（箱数相等且候选唯一）
+    singles = [g for g in cands if g["boxes"] == boxes]
+    if len(singles) == 1:
+        return _merge_workgroups([singles[0]])
+
+    # 3) 子集凑和（合并报关一票 = 多工作号）
+    mode = (record.get("运输方式") or "").strip()
+    weight = _to_float(record.get("总重量"))
+
+    # 同一票报关 = 同一客户渠道：按「精确渠道」分组后组内子集凑和。
+    # 只用运抵国+箱数会在整月清单里凑出成百上千个跨渠道组合（cap 截断前根本找不到正确的），
+    # 分组既消歧（排除跨渠道凑和）又大幅缩小搜索空间。周次约束已把每组工作号压到个位数，
+    # 所以这里只按箱数子集和即可，重量只作为「消歧」信号而非硬约束——
+    # 因为美森/美转加等海运整柜的「货箱重量」≠报关「毛重」（毛重含托盘，如 BG20260814025
+    # 236 箱货箱重量 3518.9 vs 报关毛重 3670.4 差 151.5kg），硬约束会误杀正确组合。
+    by_channel = {}
     for g in cands:
-        if g["boxes"] == boxes and abs(g["weight"] - weight) < 1.0:
-            return _merge_workgroups([g])
-    # 否则回溯凑组合（一票 = 多工作号合并报关，如 6月第4周 BG20260625002 = 2 个工作号）
-    chosen = _subset_sum(cands, boxes, weight, 0, [], 0, 0.0)
-    if not chosen:
+        by_channel.setdefault((g.get("channel") or "").strip(), []).append(g)
+
+    solutions = []  # list[(solution, is_full)]，is_full = 该渠道组箱数之和正好等于本票箱数
+    for ch, group in by_channel.items():
+        cm = _channel_mode(ch)
+        # 渠道大类明确且与报关单运输方式不一致 → 跳过（如报关=水路 却遇到 联邦IE 空运组）
+        if cm and mode and cm != mode:
+            continue
+        group_total = sum(g["boxes"] for g in group)
+        is_full = (group_total == boxes)
+        for s in _subset_sum_by_boxes(group, boxes):
+            solutions.append((s, is_full))
+
+    if not solutions:
         return None
-    return _merge_workgroups(chosen)
+    if len(solutions) == 1:
+        return _merge_workgroups(solutions[0][0])
+    return _merge_workgroups(_pick_best(solutions, mode, weight))
 
 
-def _subset_sum(cands, target_boxes, target_wt, idx, chosen, cur_boxes, cur_wt):
-    """回溯找「箱数之和==target_boxes 且 重量之和≈target_wt」的工作号子集。"""
-    if cur_boxes == target_boxes and abs(cur_wt - target_wt) < 1.0:
-        return list(chosen)
-    if cur_boxes >= target_boxes or idx >= len(cands):
-        return None
-    r = _subset_sum(cands, target_boxes, target_wt, idx + 1, chosen, cur_boxes, cur_wt)
-    if r is not None:
-        return r
-    g = cands[idx]
-    chosen.append(g)
-    r = _subset_sum(cands, target_boxes, target_wt, idx + 1, chosen, cur_boxes + g["boxes"], cur_wt + g["weight"])
-    chosen.pop()
-    return r
+def _subset_sum_by_boxes(cands, target_boxes, cap=200):
+    """回溯找「箱数之和 == target_boxes」的全部工作号子集（只按箱数，不碰重量）。
+
+    返回 list[list[group]]，最多 cap 个（防组合爆炸）；一个都找不到返回 []。
+    """
+    solutions = []
+
+    def dfs(idx, chosen, cur_boxes):
+        if cur_boxes == target_boxes:
+            solutions.append(list(chosen))
+            return
+        if cur_boxes > target_boxes or idx >= len(cands) or len(solutions) >= cap:
+            return
+        # 不选当前
+        dfs(idx + 1, chosen, cur_boxes)
+        # 选当前
+        g = cands[idx]
+        chosen.append(g)
+        dfs(idx + 1, chosen, cur_boxes + g["boxes"])
+        chosen.pop()
+
+    dfs(0, [], 0)
+    return solutions
+
+
+def _pick_best(solutions, mode, weight):
+    """在多组候选子集和中选出正确的一组（solutions = [(solution, is_full), ...]）。
+
+    优先级：
+      1. 「整组消费」—— 某渠道组箱数之和恰好 == 本票箱数（= 本票就是该渠道本周全部工作号）。
+         美森等海运毛重含托盘、重量不可靠，此时这是最强结构信号；
+      2. 总货箱重量最接近报关毛重（美国海运 22 日达货箱重量 == 报关毛重，精确吻合时最准）；
+      3. 工作号更少（合并票尽量少凑工作号，奥卡姆剃刀）。
+    """
+    full = [it for it in solutions if it[1]]
+    if len(full) == 1:
+        return full[0][0]
+    if full:
+        solutions = full  # 多个整组解时，继续按重量/工作号数量消歧
+
+    def wt_diff(it):
+        if weight is None:
+            return 0.0
+        return abs(sum(g.get("weight", 0.0) for g in it[0]) - weight)
+
+    if weight is not None:
+        best_diff = min(wt_diff(it) for it in solutions)
+        exact = [it for it in solutions if wt_diff(it) <= best_diff + 1e-6]
+        if len(exact) == 1:
+            return exact[0][0]
+        solutions = exact
+
+    return min(solutions, key=lambda it: len(it[0]))[0]
 
 
 def _merge_workgroups(groups):

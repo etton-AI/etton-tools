@@ -275,6 +275,19 @@ def api_extract_batch():
             except Exception:
                 order_map = {}
 
+    # 2d. 工作周边界：从各票「文件夹名周次 + PDF 文件名 TRKJ」推导每周 TRKJ 区间，
+    # 供整月箱货清单按周限定匹配（防止跨周凑和出错误工作号组合）
+    week_bounds = {}
+    if weekly_groups:
+        ticket_infos = []
+        for _idx in sorted(tickets):
+            _t = tickets[_idx]
+            _pdfs = _t["pdfs"]
+            if not _pdfs:
+                continue
+            ticket_infos.append((_t["folder"], core._trkj_from_names([pf.filename or "" for pf in _pdfs])))
+        week_bounds = core._week_bounds(ticket_infos, weekly_groups)
+
     # 3. 逐票处理
     out_tickets = []
     for idx in sorted(tickets):
@@ -288,11 +301,16 @@ def api_extract_batch():
         # 保存所有 PDF，合并成一份（单份也统一走合并）
         # 注意：保留原始文件名，merge 排序靠文件名里的「报/放/委托」关键词识别拆分底单顺序
         saved_paths = []
+        pdf_names = []
         for j, pf in enumerate(pdfs):
             safe_name = re.sub(r'[\\/:*?"<>|]', "_", pf.filename or f"pdf{j}.pdf")
             p = os.path.join(UPLOAD, f"batch_{idx}_{j}_{stamp}_{safe_name}")
             pf.save(p)
             saved_paths.append(p)
+            pdf_names.append(pf.filename or "")
+        # 底单 PDF 文件名通常直接含 TRKJ 号（如「中山易通TRKJ26080001…69件.pdf」），
+        # 作为周汇总箱货清单匹配的权威提示（比 国家+箱数+毛重 更可靠）
+        trkj_hint = core._trkj_from_names(pdf_names)
         merged_pdf = _merged_path(folder)
         try:
             core.merge_declaration_pdfs(saved_paths, merged_pdf)
@@ -345,7 +363,9 @@ def api_extract_batch():
             channel = None
             packing_meta = None
             if weekly_groups:
-                wm = core.match_weekly_packing(rec, weekly_groups)
+                week = core._parse_week(folder)
+                trkj_range = week_bounds.get(week) if week is not None else None
+                wm = core.match_weekly_packing(rec, weekly_groups, trkj_hint=trkj_hint, trkj_range=trkj_range)
                 if wm:
                     packing_meta = wm
                     if wm.get("products_en"):
