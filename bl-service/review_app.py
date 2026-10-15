@@ -161,6 +161,8 @@ def api_extract():
                             rec["起运日期"] = info["etd"]
                         if info.get("vessel") and not (rec.get("船名航次") or "").strip():
                             rec["船名航次"] = info["vessel"]
+                            # 运输工具 = 船名航次（铁路班列号/卡航车次），追踪表补班列号时同步
+                            rec["运输工具"] = info["vessel"]
                         arrival = core._arrival_date(info.get("etd"), info.get("eta"), express=core._is_express(channel, rec.get("运输方式")))
                         if arrival:
                             rec["申请日期"] = core._date_cn(arrival)
@@ -304,6 +306,13 @@ def api_extract_batch():
         pdf_names = []
         for j, pf in enumerate(pdfs):
             safe_name = re.sub(r'[\\/:*?"<>|]', "_", pf.filename or f"pdf{j}.pdf")
+            # 原始文件名可能超长（中文名 UTF-8 编码后超 255 字节），Linux 会报 [Errno 36] File name too long。
+            # 截断到安全字节数（保留扩展名供 pypdf 判断格式；完整原名另存 pdf_names 供 TRKJ 提取/merge 排序）。
+            if len(safe_name.encode("utf-8")) > 120:
+                base, ext = os.path.splitext(safe_name)
+                ext = ext[:20]
+                base = base.encode("utf-8")[:120 - len(ext.encode("utf-8"))].decode("utf-8", errors="ignore")
+                safe_name = base + ext
             p = os.path.join(UPLOAD, f"batch_{idx}_{j}_{stamp}_{safe_name}")
             pf.save(p)
             saved_paths.append(p)
@@ -401,6 +410,8 @@ def api_extract_batch():
                         rec["起运日期"] = info["etd"]
                     if info.get("vessel") and not (rec.get("船名航次") or "").strip():
                         rec["船名航次"] = info["vessel"]
+                        # 运输工具 = 船名航次（铁路班列号/卡航车次），追踪表补班列号时同步
+                        rec["运输工具"] = info["vessel"]
                     arrival = core._arrival_date(info.get("etd"), info.get("eta"), express=core._is_express(channel, rec.get("运输方式")))
                     if arrival:
                         rec["申请日期"] = core._date_cn(arrival)

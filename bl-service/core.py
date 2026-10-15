@@ -190,12 +190,14 @@ def _is_english(s):
 _CHANNEL_CATEGORY_KEYWORDS = [
     ("铁路", ["铁路", "快铁", "铁派"]),
     ("卡航", ["卡航"]),
-    ("快递", ["联邦", "空派"]),
+    ("空运", ["空派", "空运"]),
+    ("快递", ["联邦"]),
 ]
 # 渠道大类 → 目的港规则（按「运抵国」查）
 _ROUTE_DEST_RULES = {
     "铁路": {"英国": "MALASZEWICZE", "德国": "DUISBURG"},
     "卡航": {"英国": "THE UK", "德国": "GERMANY"},
+    "空运": {"英国": "LONDON", "德国": "FRANKFURT"},
 }
 # 快递渠道（香港联邦IP）固定起运地
 _EXPRESS_ORIGIN = "SHENZHEN"
@@ -218,7 +220,7 @@ def _is_express(channel, mode):
     海运/铁路/卡航等慢渠道才适用 ETD+10。"""
     if (mode or "").strip() == "航空运输":
         return True
-    if _channel_category(channel) == "快递":
+    if _channel_category(channel) in ("快递", "空运"):
         return True
     return False
 
@@ -228,10 +230,12 @@ def apply_port_map(rec, channel=None):
     起运港：
       - 快递（香港联邦IP）→ 固定 SHENZHEN
       - 海运（水路运输）→ 离境口岸 → port_map.origin
-      - 非海运（铁路/公路/航空）→ 关区名 → customs_office_map
+      - 空运（航空运输）→ 离境口岸机场 → port_map.origin
+      - 非海运（铁路/公路）→ 关区名 → customs_office_map
     目的港（按「运抵国」查，非「指运港」）：
       - 铁路 → {英国:MALASZEWICZE, 德国:DUISBURG}
       - 卡航 → {英国:THE UK, 德国:GERMANY}
+      - 空运 → {英国:LONDON, 德国:FRANKFURT}
       - 其他 → port_map.destination。"""
     pm = load_port_map()
     origins = pm.get("origin", {}) or {}
@@ -247,6 +251,11 @@ def apply_port_map(rec, channel=None):
         rec["起运地"] = _EXPRESS_ORIGIN
         rec["_起运地_固定"] = True
     elif mode == "水路运输":
+        rec["_起运地_原始"] = cn
+        if cn and cn in origins:
+            rec["起运地"] = origins[cn]
+    elif mode == "航空运输":
+        # 空运：起运港 = 离境口岸机场 → 英文（如「广州白云国际机场」→ GUANGZHOU）
         rec["_起运地_原始"] = cn
         if cn and cn in origins:
             rec["起运地"] = origins[cn]
@@ -1688,9 +1697,11 @@ def fill_telex_docx(output_path, rec, customer=DEFAULT_CUSTOMER):
     p = para(L)
     add_mixed(p, f"运输工具 (MEANS OF TRANSPORT): {rec.get('运输工具','')}")
     p = para(L, line=1.0)
-    p = para(L)
-    add_mixed(p, f"柜号 (CONTAINER NO.): {rec.get('柜号','')}")
-    p = para(L, line=1.0)
+    # 柜号仅海运提单需要：卡航/空运等渠道柜号为空时整行删除（含其上下的空行间距）
+    if (rec.get('柜号') or "").strip():
+        p = para(L)
+        add_mixed(p, f"柜号 (CONTAINER NO.): {rec.get('柜号','')}")
+        p = para(L, line=1.0)
     p = para(L, line=Pt(15.7))
     add_mixed(p, f"目的地 (DESTINATION): {rec.get('目的地','')}")
     p = para(L, line=1.0)
@@ -2517,7 +2528,9 @@ def match_weekly_packing(record, workgroups, trkj_hint=None, trkj_range=None):
     """把一张报关底单 record 匹配到周汇总箱货清单的若干工作号，返回合并后的箱货清单 dict。
 
     匹配键（按优先级）：
-      1) PDF 文件名里的 TRKJ 号（唯一确定，文件名是权威，不依赖国家/箱数提取）
+      1) PDF 文件名里的 TRKJ 号（唯一确定，文件名是权威，不依赖国家/箱数提取）。
+         若命中组的箱数之和 == 报关箱数 → 直接采用；否则（合并报关，文件名只写了部分 TRKJ）
+         把这些组作为「必须包含」约束，继续按周次/国家/箱数子集凑和补全其余工作号。
       2) 工作周（trkj_range）——整月清单时限定同一工作周，防止跨周凑和
       3) 运抵国 + 箱数（箱数精确命中或子集凑和，合并报关一票 = 多工作号）
       4) 子集凑和时按「精确客户渠道」分组——同一票报关对应同一客户渠道，组内再凑箱数，
@@ -2530,17 +2543,21 @@ def match_weekly_packing(record, workgroups, trkj_hint=None, trkj_range=None):
     boxes = _to_int(record.get("箱数"))
     ctry = _norm_country(record.get("运抵国"))
 
-    # 1) TRKJ 文件名提示：直接按系统SO 定位，命中即采用
+    # 1) TRKJ 文件名提示：确定本票「必须包含」的工作号（文件名是权威，不依赖国家/箱数提取）
+    must_include = []
     if trkj_hint:
-        hinted = [g for g in workgroups if (g.get("so") or "") in trkj_hint]
-        if hinted:
-            return _merge_workgroups(hinted)
-        # 文件名明确写了 TRKJ 号，但箱货清单里没有该号 → 箱货清单不是本票对应的那一份（周份不符），
-        # 直接判匹配失败，避免退回箱数凑和凑出错误的工作号
-        return None
+        must_include = [g for g in workgroups if (g.get("so") or "") in trkj_hint]
+        if not must_include:
+            # 文件名明确写了 TRKJ 号，但箱货清单里没有该号 → 箱货清单不是本票对应的那一份（周份不符），
+            # 直接判匹配失败，避免退回箱数凑和凑出错误的工作号
+            return None
+        # 命中组的箱数之和正好 == 报关箱数 → 直接采用（非合并报关的常规情况）
+        if boxes is not None and sum(g.get("boxes", 0) for g in must_include) == boxes:
+            return _merge_workgroups(must_include)
 
     if not ctry or boxes is None:
-        return None
+        # 无国家/箱数可校验 → 退回文件名提示（至少保证文件名里的 TRKJ 被采用）
+        return _merge_workgroups(must_include) if must_include else None
 
     # 2) 周次约束：同一票只匹配「同一工作周」的工作号（整月清单时关键，防止跨周凑和出错误组合）
     if trkj_range:
@@ -2551,9 +2568,9 @@ def match_weekly_packing(record, workgroups, trkj_hint=None, trkj_range=None):
     if not cands:
         return None
 
-    # 2) 单工作号精确命中（箱数相等且候选唯一）
+    # 2) 单工作号精确命中（箱数相等且候选唯一；有文件名提示时跳过——合并报关需多工作号凑和）
     singles = [g for g in cands if g["boxes"] == boxes]
-    if len(singles) == 1:
+    if len(singles) == 1 and not must_include:
         return _merge_workgroups([singles[0]])
 
     # 3) 子集凑和（合并报关一票 = 多工作号）
@@ -2579,10 +2596,14 @@ def match_weekly_packing(record, workgroups, trkj_hint=None, trkj_range=None):
         group_total = sum(g["boxes"] for g in group)
         is_full = (group_total == boxes)
         for s in _subset_sum_by_boxes(group, boxes):
+            # 合并报关：文件名只写了部分 TRKJ 时，凑和结果必须包含文件名提示的全部工作号
+            if must_include and not _contains_all(s, must_include):
+                continue
             solutions.append((s, is_full))
 
     if not solutions:
-        return None
+        # 凑不出包含文件名 TRKJ 的组合 → 退回文件名提示结果
+        return _merge_workgroups(must_include) if must_include else None
     if len(solutions) == 1:
         return _merge_workgroups(solutions[0][0])
     return _merge_workgroups(_pick_best(solutions, mode, weight))
@@ -2611,6 +2632,12 @@ def _subset_sum_by_boxes(cands, target_boxes, cap=200):
 
     dfs(0, [], 0)
     return solutions
+
+
+def _contains_all(solution, must_include):
+    """子集和候选 solution 是否包含 must_include 里的全部工作号（按「工作号」标识）。"""
+    sol_ids = {g.get("工作号") for g in solution}
+    return all(g.get("工作号") in sol_ids for g in must_include)
 
 
 def _pick_best(solutions, mode, weight):

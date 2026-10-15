@@ -8,7 +8,9 @@
     "蛇口": "SHEKOU",
     "宁波北仑港港区": "NINGBO",
     "南沙港一期码头": "NANSHA",
-    "烟台港": "YANTAI"
+    "烟台港": "YANTAI",
+    "广州白云国际机场": "GUANGZHOU",
+    "济南遥墙机场": "JINAN"
   },
   "destination": {
     "英国": "MALASZEWICZE",

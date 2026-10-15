@@ -29,7 +29,12 @@ spec:
               memory: 1Gi
             limits:
               cpu: 1500m
-              memory: 2Gi
+              memory: 4Gi
+          # 持久化 workspace：uploads/merged/output 需在「提取」和「生成」两次请求间存活。
+          # 无 PVC 时容器重启（OOM/滚动更新）会清空已合并的底单 → 生成阶段「底单缺失」。
+          volumeMounts:
+            - name: workspace
+              mountPath: /app/workspace
           # 以 root 运行：LibreOffice headless 首次运行需写 HOME（/root/.config）建 profile，
           # 非 root 且无 HOME 时 soffice 会静默失败 → docx 不转 PDF
           readinessProbe:
@@ -47,6 +52,22 @@ spec:
           env:
             - name: PYTHONUNBUFFERED
               value: "1"
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: bl-service-workspace
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bl-service-workspace
+  namespace: ns-22nz9gjz
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
 ---
 apiVersion: v1
 kind: Service

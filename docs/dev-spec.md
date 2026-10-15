@@ -1283,6 +1283,18 @@ interface PacificSplitResult {
     - 结果：整月箱单 48 票全部匹配正确，匹配耗时从分钟级降到 ~0.01s（瓶颈只剩 RapidOCR ~37s）。
     - 位置：`bl-service/core.py`（`match_weekly_packing` + `_pick_best` + `_week_bounds` + `_parse_week` + `_trkj_num`）、`bl-service/review_app.py`（`week_bounds` 推导 + 传入 `trkj_range`）
 
+94. **拓锐 8 月物流数据 7 处问题（运输工具/合并报关/文件名超长/空运/柜号行/底单丢失）** (2026-10-14)
+    - 症状：上传「拓锐8月份底单 + 物流追踪表 + 整月箱货清单」后，提单/电放保函出现 7 处错误。
+    - 根因与修复（逐条对应）：
+      1. **运输工具未回填**（`BG20260807002` 船名航次正确匹配 X8186，但电放保函「运输工具」为空）→ 追踪表补船名航次时只回填了 `船名航次`。修复：`review_app.py` 的 `api_extract` / `api_extract_batch` 在 `vessel` 命中且 `船名航次` 为空时同步写 `rec["运输工具"] = info["vessel"]`。
+      2. **合并报关未识别**（`BG20260811001`=TRKJ26080019+20、`BG20260814036`=TRKJ26080045+46，一个报关底单覆盖多个工作号，但文件名只含单个 TRKJ）→ `match_weekly_packing` 的 `trkj_hint` 只在「箱数≠整组和」时兜底。修复：当 `trkj_hint` 命中的工作号整组箱数之和 == 本票箱数时直接返回该组；否则把 `must_include` 作为子集和候选的硬约束（新增 `_contains_all`），保证合并报关的工作号全部入选。
+      3. **合并报关另一组同样漏识别**（同 #2，`TRKJ26080019+20`）→ 同上修复。
+      4. **`[Errno 36] File name too long`**（浏览器上传 webkitRelativePath 完整相对路径，`/` 被 werkzeug 替换成 `_`，文件名超 Linux 255 字节上限）→ `review_app.py` `api_extract_batch` 保存前截断 `safe_name` 到 ≤120 字节（按 UTF-8 字节截断，保留扩展名）。
+      5. **空运渠道未识别**（B/L 号 `16015532591 2591F` 空运，目的港写成铁路的 MALASZEWICZE）→ `core.py` `_CHANNEL_CATEGORY_KEYWORDS` 新增「空运」类（关键词 `空派/空运`，从快递类剥离 `空派`）；`_ROUTE_DEST_RULES` 新增空运规则（英国→LONDON、德国→FRANKFURT）；`_is_express` 把空运纳入快递判定；`apply_port_map` 新增航空运输起运地映射（机场→城市英文）；`port_map.json` 补 `广州白云国际机场→GUANGZHOU`、`济南遥墙机场→JINAN`。
+      6. **柜号行为空时仍输出空行**（卡航/空运无柜号）→ `fill_telex_docx` 柜号行改为条件输出：`柜号` 非空才写「柜号 (CONTAINER NO.)」行及其空行间距。
+      7. **第 4 周全部底单丢失** → 部署无 PVC，`workspace/merged/` 随容器重启/重建丢失，extract 与 generate 之间合并 PDF 被清空。修复：`k8s/bl-service-deploy.yaml` 新增 5Gi PVC `bl-service-workspace` 挂到 `/app/workspace`，内存上限提到 4Gi（需重新 `kubectl apply` 并确认集群有默认 StorageClass）。
+    - 位置：`bl-service/core.py`、`bl-service/review_app.py`、`bl-service/port_map.json`、`k8s/bl-service-deploy.yaml`
+
 ### 待重构项
 
 - [ ] 将 session 存储从内存 Map 改为临时文件或 Redis
