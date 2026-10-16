@@ -84,6 +84,21 @@ const TOOLS: Tool[] = [
     ),
   },
   {
+    href: "/tr-to-supplier",
+    title: "TR转供应商模板",
+    badge: "高效",
+    desc: "TR客户发票转供应商下单模板，支持凯鑫/英美/星链/航乐",
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+        <path d="M14 2v6h6" />
+        <path d="M9 15h6" />
+        <path d="M9 11h1" />
+        <path d="M14 11h1" />
+      </svg>
+    ),
+  },
+  {
     href: "/warehouse-entry",
     title: "TR入仓数据整理",
     badge: "常用",

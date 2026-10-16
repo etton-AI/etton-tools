@@ -665,6 +665,30 @@ interface PacificSplitResult {
 
 ---
 
+### 3.16 TR转供应商模板 — `/tr-to-supplier`
+
+**文件**: `src/app/tr-to-supplier/page.tsx` + `src/lib/tr-to-supplier.ts` + `src/app/api/tr-to-supplier/route.ts`
+
+#### 功能
+
+上传 TR 客户发票（Page1 sheet），选择供应商（凯鑫/英美/星链/航乐），填写客户订单号 + 渠道名，按供应商下单模板逐列映射输出发票。凯鑫/航乐自动嵌入产品图片（WPS DISPIMG）。
+
+#### 核心业务规则（以答案文件反推）
+
+- 货箱编号 = 源货箱编号 + `U000001-` + 箱数（凯鑫/英美/航乐）；星链用累计区间「起-止」
+- 单箱数量 = 总数量 / 箱数；凯鑫 货箱重量 = 毛重 − 0.5、长/宽/高各 −1（凯鑫特有）
+- 报关方式：有单证 → 报关退税（凯鑫/英美/航乐）/ 合并报关（星链）；无单证 → 买单报关
+- 交税/是否包税：清关方式「自税」→ 凯鑫「自税递延」/ 航乐「不包税递延」
+- 收件地址为模板内 VLOOKUP 公式（凯鑫/英美）或 INDIRECT 选表（星链），写仓库代码自动带出
+- 航乐：SHIPMENT ID / AMAZON REFERENCE ID = 逗号连接货箱编号 / refId；ZIP/CITY 取源 F10/F11（仓库地址/邮编）；材重 = 长×宽×高 ÷ 6000、CBM = 长×宽×高 ÷ 1e6、净重(单个) = 净重 ÷ 单箱数量；物品属性按关键词粗分类（灯类/玩具类/服装类）
+
+#### API
+
+- `POST /api/tr-to-supplier`：formData `file` + `supplier` + `customerOrderNo` + `channelName` → `{ sessionId, result }`
+- `GET /api/tr-to-supplier?session=xxx`：下载转换结果（30 分钟 session 过期）
+
+---
+
 ## 4. 非目标（明确没做的）
 
 - ❌ **用户认证/登录**: LAN 工具，无权限控制
@@ -677,6 +701,7 @@ interface PacificSplitResult {
 - ❌ **i18n 国际化**: 仅中文
 - ❌ **PWA / 离线支持**: 无 Service Worker
 - ❌ **自动化测试**: 无单元测试 / E2E 测试
+- ❌ **航乐物品属性自动分类**: 目前按品名/用途关键词粗分类（灯类/玩具类/服装类/家居类），命中不到留空供人工补填；航乐「渠道/交货仓库」仍为固定值或人工输入
 - ✅ **OCR 扫描件识别**（2026-09 已实现）：扫描底单（无文字层）用 RapidOCR（rapidocr_onnxruntime，中文识别准、比 tesseract 稳）识别，复用标签定位提取（提单号/船名航次/起运地/目的港/运抵国/箱数/品名/总重量/起运日期均可提取）
 - ❌ **英文自动翻译**: 提单/保函的英文字段（shipper 英文名+地址、consignee 英文、起运地/目的港英文、品名翻译、总体积、实际起运日期）底单里没有，靠人工在审核表补填，不做自动翻译/港口映射
   - ⚠️ 已部分放开：拓锐客户 shipper/consignee 英文为**固定常量硬编码**；品名英文翻译 + 总体积改由**箱货清单 xlsx** 自动汇总（`parse_packing_list`）。仍留人工的只有：起运地/目的港**英文**（底单是中文「阿拉山口铁路/英国」，提单要英文 `CHONGQING`/`MALASZEWICZE`）+ 实际起运日期（提单要实际开船/发车日，底单只有申报日期）。船名航次本身**在底单有**（「运输工具名称及航次号」列，海运为船名航次、非海运该列为 `@` 占位符→空）
@@ -1295,6 +1320,20 @@ interface PacificSplitResult {
       7. **第 4 周全部底单丢失** → 部署无 PVC，`workspace/merged/` 随容器重启/重建丢失，extract 与 generate 之间合并 PDF 被清空。修复：`k8s/bl-service-deploy.yaml` 新增 5Gi PVC `bl-service-workspace` 挂到 `/app/workspace`，内存上限提到 4Gi（需重新 `kubectl apply` 并确认集群有默认 StorageClass）。
     - 位置：`bl-service/core.py`、`bl-service/review_app.py`、`bl-service/port_map.json`、`k8s/bl-service-deploy.yaml`
 
+95. **TR转供应商：航乐模板 `.xls` 转 `.xlsx` 合并单元格 off-by-one 丢表头** (2026-10-15)
+    - 症状：用 `xlrd.merged_cells` 转 openpyxl `merge_cells` 时，把 `(rlo, rhi, clo, chi)` 的**排他** `rhi/chi` 当成**包含**，写成 `end_row=rhi+1`/`end_col=chi+1`，合并范围整体多一行一列；叠加 openpyxl 合并会清空非左上角单元格值，导致表头标签（ADD 收件地址 / COUNTRY / SHIPMENT ID 等）被清空。
+    - 修复：`merge_cells(start_row=rlo+1, start_column=clo+1, end_row=rhi, end_column=chi)`（`rhi/chi` 不 +1），并先 merge 再填值。模板已用 `_scratch/fix_hangyue_template.py` 重新生成。
+    - 位置：`public/templates/tr-suppliers/航乐-模板.xlsx`、`_scratch/fix_hangyue_template.py`
+
+96. **TR转供应商：WPS DISPIMG 内嵌图片需 zip 后处理注入** (2026-10-15)
+    - 凯鑫/航乐产品图片列写 `=_xlfn.DISPIMG("ID_xxx",1)` 公式；exceljs 只写公式字符串，图片实体（`xl/cellimages.xml` + `xl/media/imageN.png` + `xl/_rels/cellimages.xml.rels` + workbook.xml.rels 的 cellImage 关系 + `[Content_Types].xml` override）需手动注入 xlsx zip。
+    - 源图片从 TR 发票 `xl/drawings/drawing1.xml` 的 `twoCellAnchor`（V 列 col21 主图 / W 列 col22 兜底）按数据行锚定提取。
+    - 位置：`src/lib/tr-to-supplier.ts`（`extractSourceImages` / `injectDispimg` / `buildCellImagesXml`）
+
+97. **TR转供应商：航乐 VAT 注册地址换行转空格** (2026-10-15)
+    - 源 B12 地址含 `\n`，但答案 `.xls` 里是空格；为逐格对齐答案，航乐 B10 写值前 `.replace(/\n/g, " ")`。
+    - 位置：`src/lib/tr-to-supplier.ts` 航乐 `fillHeader`
+
 ### 待重构项
 
 - [ ] 将 session 存储从内存 Map 改为临时文件或 Redis
@@ -1307,6 +1346,7 @@ interface PacificSplitResult {
 - [ ] 多供应商对账引擎中 `reconciliation.ts`（旧版天图对账）可移除，统一使用 `multi-supplier-reconciliation.ts`
 - [ ] 供应商配置（17家）可考虑外置为 YAML/JSON 配置文件，支持热加载
 - [ ] SEALOS 部署增加 liveness/readiness 探针失败时的自动告警
+- [ ] 航乐「物品属性」关键词分类命中率低，可外置映射表或加下拉人工选择
 
 ---
 
