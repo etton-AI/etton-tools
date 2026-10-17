@@ -120,7 +120,7 @@ ETTON 电商AI/
 - `/bl-review` — 提单 + 电放保函
 - `/kuajingbao-insurance` — 跨境堡批量投保
 - `/ls-to-supplier` — 朗胜转美线下单映射
-- `/yx-to-tiantu` — 延讯转天图发票
+- `/yx-to-tiantu` — 延讯转供应商发票（天图/星链/皓鹏/美琦，批量上传 + 渠道下拉）
 
 无服务端逻辑，纯客户端渲染。
 
@@ -1360,6 +1360,20 @@ interface PacificSplitResult {
     - **易通发票用原始 XML 行位移而非 ExcelJS 重写**：源 TR 发票含浮动图片（`xl/drawings/drawing1.xml` + `xl/media/*`），ExcelJS 重写会丢图片。`buildEttonInvoice()` 用 JSZip 直接改 zip：`xl/worksheets/sheetN.xml` 的行号（`<row r>`/`<c r>`/`<mergeCell ref>`/`<dimension ref>`）≥8 部分 +1、`drawing1.xml` 的 `<xdr:row>`（0 基 ≥7）+1，media 原样保留。`resolveWorksheetTarget()` 经 workbook.xml + rels 把 sheet 名解析成 `xl/worksheets/sheetN.xml`。
     - **已知限制**：行位移只处理单张 `drawing1.xml`；若源文件有多张 drawing 需扩展。
     - 位置：`src/lib/tr-to-supplier.ts`（`getSupplierChannels` / `buildEttonInvoice` / `resolveWorksheetTarget` / `shiftRowRefsInSheetXml` / `shiftRowsInDrawingXml`）、`src/app/api/tr-to-supplier/route.ts`、`src/app/api/tr-to-supplier/channels/route.ts`、`src/app/tr-to-supplier/page.tsx`
+
+102. **延讯(YX)转供应商：批量上传 + 多供应商（天图/星链/皓鹏/美琦）+ 渠道下拉解析** (2026-10-17)
+    - **多供应商配置化**：`src/lib/ettong-to-supplier.ts` 从单一 `convertYxToTiantu()` 改为 `YxSupplierSpec` 配置表（`YX_SUPPLIERS`，key = 天图/星链/皓鹏/美琦/安邦），`convertYxToSupplier(filePath, name, supplier, opts)` 按供应商分派 `fillHeader`/`mapItem`；`opts = { customerOrderNo, channelName }`。安邦无模板 `ready:false` 占位。
+    - **皓鹏模板 `.xls` → `.xlsx`**：ExcelJS 只支持 `.xlsx`，需用 Python（xlrd+openpyxl）一次性把 `模板转换/皓鹏-模板.xls` 转成 `皓鹏-模板.xlsx`。转换保留值/示例行/sheet 名，但**边框/列宽等格式丢失**——数据行填充时统一补边框（复用天图做法）。**坑**：皓鹏收件人字段（B3/B4/B5…）在模板里是硬编码示例值（非公式），转换后未替换，需人工核对。
+    - **皓鹏值单元格在 F 列（col 6）非 E 列（col 5）**：E5/E6/E7/E13 是「报关方式/交税方式/币种/PO」的**中文标签**，真正的值格在 F5/F6/F7/F13。定位时勿按直觉取 E 列。
+    - **4 家映射无答案文件、靠模板示例推断**：星链 B9 报关类型（`无单证`→`不需报关`、`报关退税`/`普通报关`→`单独报关`、含 `合并`→`合并报关（…）`）；美琦 A 列货箱编号为累计「起-止」箱号范围（`${start}-${end}`，start=前序累计+1）；皓鹏 F5 报关方式（`报关退税`→`单证报关`、`普通报关`→`非单证报关`）；星链默认取 `美中北` sheet（另有美中南/美西/美东北/美东南同结构）。详见 `specs/yx-to-tiantu.md` §7 待人工核对项。
+    - **批量校验同国家**：`convertYxBatch()` 校验所有源文件 `country`（F9）一致，不一致抛 `YxValidationError` → route 返回 400（而非 500）；渠道由界面统一选。ZIP 内同名文件 `uniqueName()` 追加 `(1)`/`(2)`，附 `_summary.json`。
+    - **批量订单号留空**：输出文件名回退为源文件名（去扩展名）。
+    - **渠道下拉运行时解析**：`parseYxChannels(supplier)` 从各模板渠道 sheet 读取（天图 `Sheet2` A 列 685 条 / 皓鹏 `2026.8.27 服务渠道表` C 列 338 条 / 美琦 `服务渠道` B 列 82 条 / 星链 `US` A 列非空 4 条，星链用合并单元格须按「非空去重」读），带内存缓存。
+    - 位置：`src/lib/ettong-to-supplier.ts`（`YxSupplierSpec` / `YX_SUPPLIERS` / `convertYxToSupplier` / `convertYxBatch` / `parseYxChannels` / `yxCurrencyFor` / `yxXinglianCustomsFor` / `yxHaopengCustomsFor` / `yxBoxPrefix`）、`src/app/api/yx-to-tiantu/route.ts`、`src/app/yx-to-tiantu/page.tsx`
+103. **延讯(YX)转供应商：美琦货箱编号按 FBA 分组顺延 + 预计提货时间改日期格式** (2026-10-17)
+    - **美琦 A 列「起-止」箱号须按 FBA 货件分组顺延**：原实现 `cumulative` 全局累加、跨 FBA 不重置，导致不同 FBA 的箱号连号（FBA-B 第一箱接着 FBA-A 编 `61-70`）。现改为 `YxSupplierSpec` 新增可选 `groupKey`，美琦 `groupKey = (it) => it.refId || it.boxId`（货件追踪编码），`convertYxToSupplier` 循环里 `currentGroup` 变化时 `cumulative` 归 0——同一个 FBA 货件内连续累加（`1-30`/`31-60`），换货件追踪编码重新从 1 起（`1-10`）。其余供应商不设 `groupKey`，行为不变。
+    - **预计提货时间 E2 导出成一串数字**：模板 E2 无日期格式，旧 `todayExcelSerial()` 只写序列数字，Excel/WPS 显示为 `46312`。新增 `writePickupDate(cell)` 在写序列的同时设 `cell.numFmt = "yyyy-mm-dd"`（LS `buildLsInvoice` 与美琦 `fillHeader` 两处都改）。**坑**：不能改写成 `new Date(y,m,d)`（本地午夜）——ExcelJS 按 Date 的 UTC 分量序列化，UTC+8 会偏一天；保留数字序列 + numFmt 最稳。
+    - 位置：`src/lib/ettong-to-supplier.ts`（`YxSupplierSpec.groupKey`、美琦 spec、`convertYxToSupplier` 循环、`writePickupDate`、`todayExcelSerial`）
 
 ### 待重构项
 

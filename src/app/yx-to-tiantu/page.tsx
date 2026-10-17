@@ -1,14 +1,15 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 
 // ============================================================
 // Types
 // ============================================================
 
-interface ResultItem {
+interface SingleResult {
   sourceFile: string;
   fileName: string;
+  supplier: string;
   customerOrderNo: string;
   warehouseCode: string;
   totalBoxes: number;
@@ -17,22 +18,38 @@ interface ResultItem {
   downloadUrl: string;
 }
 
+interface BatchFileItem {
+  sourceFile: string;
+  fileName: string;
+  country: string;
+  warehouseCode: string;
+  totalBoxes: number;
+  dataRows: number;
+}
+
+interface BatchResult {
+  zipFileName: string;
+  supplier: string;
+  country: string;
+  files: BatchFileItem[];
+  warnings: string[];
+  downloadUrl: string;
+}
+
 interface ConvertResponse {
   sessionId: string;
-  result: ResultItem;
+  kind: "single" | "batch";
+  result: SingleResult | BatchResult;
   error?: string;
 }
 
-const CHANNELS = [
-  "加拿大超快线-卡派",
-  "加拿大快线卡派-包税（ZIM/合德统配）",
-  "加拿大快线UPS派包税（ZIM/合德统配）",
-  "加拿大普船包税-海派",
-  "美转加30日达卡派包税",
-  "美转加28日达卡派包税",
-  "易E达卡派包税",
-  "易速达卡派包税",
-];
+const SUPPLIERS = [
+  { key: "天图", label: "天图", ready: true },
+  { key: "星链", label: "星链", ready: true },
+  { key: "皓鹏", label: "皓鹏", ready: true },
+  { key: "美琦", label: "美琦", ready: true },
+  { key: "安邦", label: "安邦（待提供模板）", ready: false },
+] as const;
 
 // ============================================================
 // Page
@@ -41,26 +58,55 @@ const CHANNELS = [
 export default function YxToTiantuPage() {
   const [isDragging, setIsDragging] = useState(false);
   const [processing, setProcessing] = useState(false);
-  const [file, setFile] = useState<File | null>(null);
-  const [customerOrderNo, setCustomerOrderNo] = useState("");
+  const [files, setFiles] = useState<File[]>([]);
+  const [supplier, setSupplier] = useState<string>("天图");
+  const [channels, setChannels] = useState<string[]>([]);
+  const [channelsLoading, setChannelsLoading] = useState(false);
   const [channelName, setChannelName] = useState("");
+  const [customerOrderNo, setCustomerOrderNo] = useState("");
   const [result, setResult] = useState<ConvertResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const isSupported = (name: string) => /\.(xlsx|xls)$/i.test(name);
 
+  // 供应商变化时读取对应渠道下拉列表
+  useEffect(() => {
+    let cancelled = false;
+    setChannelsLoading(true);
+    setChannelName("");
+    setError(null);
+
+    fetch(`/api/yx-to-tiantu?supplier=${encodeURIComponent(supplier)}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled) return;
+        if (data.error) setError(data.error);
+        else setChannels(data.channels || []);
+      })
+      .catch(() => {
+        if (!cancelled) setError("渠道加载失败，请重试");
+      })
+      .finally(() => {
+        if (!cancelled) setChannelsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [supplier]);
+
   const convert = useCallback(async () => {
-    if (!file) {
+    if (files.length === 0) {
       setError("请先上传延讯易通标准模板");
       return;
     }
-    if (!customerOrderNo.trim()) {
-      setError("请填写客户订单号");
+    if (!supplier) {
+      setError("请选择供应商");
       return;
     }
-    if (!channelName.trim()) {
-      setError("请填写服务渠道");
+    if (!channelName) {
+      setError("请选择渠道");
       return;
     }
 
@@ -70,9 +116,10 @@ export default function YxToTiantuPage() {
 
     try {
       const formData = new FormData();
-      formData.append("file", file);
-      formData.append("customerOrderNo", customerOrderNo.trim());
-      formData.append("channelName", channelName.trim());
+      for (const f of files) formData.append("files", f);
+      formData.append("supplier", supplier);
+      formData.append("channelName", channelName);
+      if (files.length === 1) formData.append("customerOrderNo", customerOrderNo.trim());
 
       const res = await fetch("/api/yx-to-tiantu", {
         method: "POST",
@@ -92,15 +139,32 @@ export default function YxToTiantuPage() {
     } finally {
       setProcessing(false);
     }
-  }, [file, customerOrderNo, channelName]);
+  }, [files, supplier, channelName, customerOrderNo]);
 
-  const handleFile = useCallback((incoming: File) => {
-    if (!isSupported(incoming.name)) {
-      setError("请选择 .xlsx 格式的易通标准模板");
-      return;
+  const addFiles = useCallback((incoming: File[]) => {
+    const valid = incoming.filter((f) => isSupported(f.name));
+    if (valid.length !== incoming.length) {
+      setError("存在非 .xlsx/.xls 文件，已忽略");
+    } else {
+      setError(null);
     }
-    setFile(incoming);
-    setError(null);
+    if (valid.length === 0) return;
+
+    setFiles((prev) => {
+      const map = new Map(prev.map((f) => [`${f.name}:${f.size}`, f]));
+      for (const f of valid) map.set(`${f.name}:${f.size}`, f);
+      return Array.from(map.values());
+    });
+    setResult(null);
+  }, []);
+
+  const removeFile = useCallback((index: number) => {
+    setFiles((prev) => prev.filter((_, i) => i !== index));
+    setResult(null);
+  }, []);
+
+  const clearFiles = useCallback(() => {
+    setFiles([]);
     setResult(null);
   }, []);
 
@@ -118,36 +182,38 @@ export default function YxToTiantuPage() {
     (e: React.DragEvent) => {
       e.preventDefault();
       setIsDragging(false);
-      const files = Array.from(e.dataTransfer.files);
-      if (files.length) handleFile(files[0]);
+      addFiles(Array.from(e.dataTransfer.files));
     },
-    [handleFile]
+    [addFiles]
   );
 
   const onFileChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
-      const files = Array.from(e.target.files || []);
-      if (files.length) handleFile(files[0]);
+      addFiles(Array.from(e.target.files || []));
       e.target.value = "";
     },
-    [handleFile]
+    [addFiles]
   );
 
   const reset = useCallback(() => {
     setResult(null);
     setError(null);
-    setFile(null);
-    setCustomerOrderNo("");
+    setFiles([]);
+    setSupplier("天图");
     setChannelName("");
+    setCustomerOrderNo("");
   }, []);
+
+  const single = result?.kind === "single" ? (result.result as SingleResult) : null;
+  const batch = result?.kind === "batch" ? (result.result as BatchResult) : null;
 
   return (
     <div className="space-y-8">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-deep">🏷️ 延讯标准模板转天图发票</h1>
+        <h1 className="text-2xl font-bold text-deep">🏷️ 延讯标准模板转供应商发票</h1>
         <p className="mt-1 text-sm text-zinc-500">
-          上传延讯易通标准模板，填写客户订单号与服务渠道，自动转换为天图供应商发票
+          批量上传延讯易通标准模板，选择供应商与渠道，自动输出对应供应商发票（单张或 ZIP）
         </p>
       </div>
 
@@ -170,64 +236,111 @@ export default function YxToTiantuPage() {
               ${processing ? "pointer-events-none opacity-60" : ""}
             `}
           >
-            {file ? (
-              <>
-                <svg className="mb-3 h-10 w-10 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <p className="max-w-md truncate text-lg font-medium text-zinc-700">{file.name}</p>
-                <p className="mt-1 text-sm text-zinc-400">点击可重新选择易通标准模板</p>
-              </>
-            ) : (
-              <>
-                <svg className="mb-4 h-12 w-12 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                </svg>
-                <p className="text-lg font-medium text-zinc-600">拖拽延讯易通标准模板到此处，或点击选择</p>
-                <p className="mt-1 text-sm text-zinc-400">支持 .xlsx 格式</p>
-              </>
-            )}
+            <svg className="mb-4 h-12 w-12 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+            </svg>
+            <p className="text-lg font-medium text-zinc-600">
+              拖拽多份延讯易通标准模板到此处，或点击选择
+            </p>
+            <p className="mt-1 text-sm text-zinc-400">
+              支持 .xlsx 格式，可一次选择多份（同一国家 + 同一渠道）
+            </p>
             <input
               ref={fileInputRef}
               type="file"
               accept=".xlsx,.xls"
+              multiple
               onChange={onFileChange}
               className="hidden"
             />
           </div>
 
+          {/* File list */}
+          {files.length > 0 && (
+            <div className="rounded-lg border border-zinc-200 bg-white p-4">
+              <div className="mb-2 flex items-center justify-between">
+                <p className="text-sm font-medium text-zinc-700">
+                  已选 {files.length} 份发票
+                </p>
+                <button
+                  onClick={clearFiles}
+                  className="text-xs text-zinc-400 hover:text-red-500 transition-colors"
+                >
+                  清空
+                </button>
+              </div>
+              <ul className="max-h-48 space-y-1.5 overflow-y-auto">
+                {files.map((f, i) => (
+                  <li
+                    key={`${f.name}:${f.size}`}
+                    className="flex items-center justify-between gap-3 rounded bg-zinc-50 px-3 py-1.5 text-sm"
+                  >
+                    <span className="truncate text-zinc-700">{f.name}</span>
+                    <button
+                      onClick={() => removeFile(i)}
+                      className="shrink-0 text-zinc-400 hover:text-red-500 transition-colors"
+                      title="移除"
+                    >
+                      ✕
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           {/* Options */}
-          <div className="grid gap-4 sm:grid-cols-2">
+          <div className="grid gap-4 sm:grid-cols-3">
             <div>
               <label className="mb-1.5 block text-sm font-medium text-zinc-700">
-                客户订单号 <span className="text-red-500">*</span>
+                供应商 <span className="text-red-500">*</span>
               </label>
-              <input
-                type="text"
-                value={customerOrderNo}
-                onChange={(e) => setCustomerOrderNo(e.target.value)}
-                placeholder="如 YXMY26090028"
+              <select
+                value={supplier}
+                onChange={(e) => setSupplier(e.target.value)}
                 className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
-              />
+              >
+                {SUPPLIERS.map((s) => (
+                  <option key={s.key} value={s.key} disabled={!s.ready}>
+                    {s.label}
+                  </option>
+                ))}
+              </select>
             </div>
             <div>
               <label className="mb-1.5 block text-sm font-medium text-zinc-700">
-                服务渠道 <span className="text-red-500">*</span>
+                渠道 <span className="text-red-500">*</span>
               </label>
-              <input
-                type="text"
-                list="yx-channels"
+              <select
                 value={channelName}
                 onChange={(e) => setChannelName(e.target.value)}
-                placeholder="如 加拿大超快线-卡派"
-                className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
-              />
-              <datalist id="yx-channels">
-                {CHANNELS.map((c) => (
-                  <option key={c} value={c} />
+                className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
+                disabled={channelsLoading}
+              >
+                <option value="">
+                  {channelsLoading ? "渠道加载中..." : "请选择渠道"}
+                </option>
+                {channels.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
                 ))}
-              </datalist>
+              </select>
             </div>
+            {files.length === 1 && (
+              <div>
+                <label className="mb-1.5 block text-sm font-medium text-zinc-700">
+                  客户订单号
+                </label>
+                <input
+                  type="text"
+                  value={customerOrderNo}
+                  onChange={(e) => setCustomerOrderNo(e.target.value)}
+                  placeholder="留空则按 FBA 编号命名"
+                  className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+              </div>
+            )}
           </div>
 
           {/* Convert button */}
@@ -258,21 +371,21 @@ export default function YxToTiantuPage() {
         </div>
       )}
 
-      {/* Result */}
-      {result && (
+      {/* Result — single */}
+      {single && (
         <>
           <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-zinc-200 bg-white p-4 shadow-sm">
             <div>
               <p className="text-sm text-zinc-600">
-                转换完成：<span className="font-semibold text-emerald-700">{result.result.fileName}</span>
+                转换完成：<span className="font-semibold text-emerald-700">{single.fileName}</span>
               </p>
               <p className="mt-0.5 text-xs text-zinc-400">
-                仓库 {result.result.warehouseCode} · 总箱数 {result.result.totalBoxes} · 数据 {result.result.dataRows} 行
+                {single.supplier} · 仓库 {single.warehouseCode} · 总箱数 {single.totalBoxes} · 数据 {single.dataRows} 行
               </p>
             </div>
             <div className="flex gap-3">
               <a
-                href={result.result.downloadUrl}
+                href={single.downloadUrl}
                 className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-primary-dark transition-colors"
               >
                 <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -289,9 +402,82 @@ export default function YxToTiantuPage() {
             </div>
           </div>
 
-          {result.result.warnings?.length > 0 && (
+          {single.warnings?.length > 0 && (
             <div className="flex flex-wrap gap-1.5">
-              {result.result.warnings.map((w, i) => (
+              {single.warnings.map((w, i) => (
+                <span key={i} className="inline-flex items-center gap-1 rounded bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">
+                  ⚠ {w}
+                </span>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Result — batch */}
+      {batch && (
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-zinc-200 bg-white p-4 shadow-sm">
+            <div>
+              <p className="text-sm text-zinc-600">
+                转换完成：<span className="font-semibold text-emerald-700">{batch.zipFileName}</span>
+              </p>
+              <p className="mt-0.5 text-xs text-zinc-400">
+                {batch.supplier} · 国家「{batch.country}」 · 共 {batch.files.length} 份供应商发票
+              </p>
+            </div>
+            <div className="flex gap-3">
+              <a
+                href={batch.downloadUrl}
+                className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-primary-dark transition-colors"
+              >
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                下载 ZIP
+              </a>
+              <button
+                onClick={reset}
+                className="inline-flex items-center gap-2 rounded-lg border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-50 transition-colors"
+              >
+                重新转换
+              </button>
+            </div>
+          </div>
+
+          {batch.files.length > 0 && (
+            <div className="rounded-lg border border-zinc-200 bg-white p-4">
+              <p className="mb-2 text-sm font-medium text-zinc-700">生成的发票清单</p>
+              <div className="max-h-64 overflow-y-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-zinc-100 text-left text-xs text-zinc-400">
+                      <th className="py-1.5 pr-3 font-medium">源发票</th>
+                      <th className="py-1.5 pr-3 font-medium">供应商发票</th>
+                      <th className="py-1.5 pr-3 font-medium">仓库</th>
+                      <th className="py-1.5 pr-3 font-medium">箱数</th>
+                      <th className="py-1.5 font-medium">数据行</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {batch.files.map((f, i) => (
+                      <tr key={i} className="border-b border-zinc-50 last:border-0">
+                        <td className="py-1.5 pr-3 text-zinc-700">{f.sourceFile}</td>
+                        <td className="py-1.5 pr-3 text-zinc-600">{f.fileName}</td>
+                        <td className="py-1.5 pr-3 font-mono text-zinc-600">{f.warehouseCode}</td>
+                        <td className="py-1.5 pr-3 text-zinc-600">{f.totalBoxes}</td>
+                        <td className="py-1.5 text-zinc-600">{f.dataRows}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {batch.warnings?.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {batch.warnings.map((w, i) => (
                 <span key={i} className="inline-flex items-center gap-1 rounded bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">
                   ⚠ {w}
                 </span>
@@ -305,9 +491,9 @@ export default function YxToTiantuPage() {
       {!result && (
         <div className="rounded-lg border border-zinc-200 bg-white p-4 text-sm text-zinc-500">
           <p>
-            💡 提示：系统自动解析易通标准模板的带电/带磁、报关方式、清关方式、总箱数、国家、仓库代码，
-            并按天图模板逐列映射货箱明细。收件地址由模板内 VLOOKUP 公式根据仓库代码自动带出，
-            交税方式（清关方式「无」→ 包税）与报关方式（普通报关 → 托管报关）自动映射。
+            💡 提示：支持天图 / 星链 / 皓鹏 / 美琦 四家供应商（安邦待提供模板）。渠道名按供应商从模板自动解析为下拉列表；
+            批量上传时须保证所有发票为同一国家、同一渠道，客户订单号可留空（按 FBA 编号命名）。
+            收件地址由模板内 VLOOKUP 公式根据仓库代码自动带出（皓鹏为静态示例值，需人工核对）。
           </p>
         </div>
       )}

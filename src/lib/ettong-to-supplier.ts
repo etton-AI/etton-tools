@@ -5,7 +5,8 @@
  * 分别转换成两家供应商的下单模板：
  *   - 朗胜 LS：易通 → 「美线发票下单映射」；按 SKU 拆分下单（一个 SKU 一个 SO），
  *     依赖上传的「SO-SKU对应表」补 SO 号，输出多张发票打包成 ZIP。
- *   - 延讯 YX：易通标准模板 → 「天图」；一张源发票输出一张天图发票。
+ *   - 延讯 YX：易通标准模板 → 供应商发票（天图/星链/皓鹏/美琦/安邦）；
+ *     支持单张或批量（批量须同国家），渠道名从供应商模板解析后下拉选择。
  *
  * 易通源顶部字段（固定坐标）：
  *   B6 业务类型 / B7 服务渠道 / B8 报关方式 / B9 是否合并报关 / B11 清关方式 /
@@ -95,10 +96,31 @@ export interface LsConvertResult {
 export interface YxConvertResult {
   sourceFile: string;
   fileName: string;
+  supplier: YxSupplierKey;
   customerOrderNo: string;
   warehouseCode: string;
   totalBoxes: number;
   dataRows: number;
+  warnings: string[];
+  buffer: Buffer;
+}
+
+/** YX 批量转换结果 */
+export interface YxBatchFile {
+  sourceFile: string;
+  fileName: string;
+  country: string;
+  warehouseCode: string;
+  totalBoxes: number;
+  dataRows: number;
+}
+
+export interface YxBatchResult {
+  sourceFiles: string[];
+  zipFileName: string;
+  supplier: YxSupplierKey;
+  country: string;
+  files: YxBatchFile[];
   warnings: string[];
   buffer: Buffer;
 }
@@ -113,8 +135,9 @@ function cellText(cell: ExcelJS.Cell): string {
   if (typeof v === "string") return v.trim();
   if (typeof v === "number") return String(v);
   if (typeof v === "object") {
-    const o = v as { richText?: { text: string }[]; text?: unknown; result?: unknown };
+    const o = v as { richText?: { text: string }[]; text?: unknown; result?: unknown; error?: unknown };
     if (o.richText) return o.richText.map((r) => r.text).join("").trim();
+    if (o.error !== undefined && o.error !== null) return ""; // 公式错误(#REF! 等)按空处理
     if (o.result !== undefined && o.result !== null) {
       const r = o.result;
       if (typeof r === "string") return r.trim();
@@ -178,6 +201,12 @@ function todayExcelSerial(): number {
   const utc = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
   const epoch = Date.UTC(1899, 11, 30);
   return Math.round((utc - epoch) / 86400000);
+}
+
+/** 写入「预计提货时间」：今天日期序列 + 日期格式，避免导出后显示成一串数字 */
+function writePickupDate(cell: ExcelJS.Cell): void {
+  cell.value = todayExcelSerial();
+  cell.numFmt = "yyyy-mm-dd";
 }
 
 /** 海关编码：纯数字转数值（美线模板 J 列为数值格式） */
@@ -350,7 +379,7 @@ async function buildLsInvoice(
   ws.getCell(17, 2).value = item.boxCount;        // B17 箱数
 
   ws.getCell(1, 5).value = opts.deliverySite;     // E1 预计交货站点
-  ws.getCell(2, 5).value = todayExcelSerial();    // E2 预计提货时间(今天)
+  writePickupDate(ws.getCell(2, 5));              // E2 预计提货时间(今天)
   ws.getCell(3, 5).value = opts.pickupMethod;     // E3 提货方式
   ws.getCell(5, 5).value = "无";                   // E5 涉证类型
   ws.getCell(7, 5).value = "无";                   // E7 出证方式
@@ -556,67 +585,350 @@ function excelPrec(v: number): number {
   return Number(v.toPrecision(15));
 }
 
-export async function convertYxToTiantu(
+/** YX 供应商标识（安邦暂未提供模板，ready=false） */
+export type YxSupplierKey = "天图" | "星链" | "皓鹏" | "美琦" | "安邦";
+
+export interface YxConvertOptions {
+  customerOrderNo: string; // 可空（批量时留空，按 FBA 编号命名）
+  channelName: string;
+}
+
+/** 用户输入类错误（参数/校验），API 层映射为 400 */
+export class YxValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "YxValidationError";
+  }
+}
+
+/** 星链「报关类型」映射：易通报关方式 → 星链不需/单独/合并报关 */
+function yxXinglianCustomsFor(customs: string): string {
+  if (customs === "无单证") return "不需报关";
+  if (customs === "报关退税" || customs === "普通报关") return "单独报关";
+  if (customs.includes("合并")) return "合并报关（两票及以上需要合并单独报关的）";
+  return customs;
+}
+
+/** 皓鹏「报关方式」映射：易通报关方式 → 皓鹏单证/非单证报关 */
+function yxHaopengCustomsFor(customs: string): string {
+  if (customs === "报关退税") return "单证报关";
+  if (customs === "普通报关") return "非单证报关";
+  return customs;
+}
+
+/** 申报币种：ISO 三位码 → 中文名（皓鹏 E7 用） */
+const YX_CURRENCY: Record<string, string> = {
+  USD: "美元", CNY: "人民币", EUR: "欧元", GBP: "英镑",
+  JPY: "日元", AUD: "澳元", CAD: "加元", HKD: "港币", MXN: "墨西哥比索",
+};
+function yxCurrencyFor(currency: string): string {
+  return YX_CURRENCY[(currency || "").toUpperCase()] || currency || "";
+}
+
+/** 皓鹏货箱编号前缀：订单号优先，留空则取首个货箱编号去掉 Uxxxx 后缀 */
+function yxBoxPrefix(orderNo: string, items: EttongItem[]): string {
+  if (orderNo) return orderNo;
+  const first = items[0]?.boxId || "";
+  return first.replace(/U\d+$/i, "");
+}
+
+interface YxMapContext {
+  index: number;            // 0-based 数据行序号
+  cumulativeStart: number;  // 本行之前已累计的箱数（美琦 A 列累计区间用）
+  boxPrefix: string;        // 皓鹏货箱编号前缀
+}
+
+interface YxSupplierSpec {
+  key: YxSupplierKey;
+  templateFile: string;    // 相对 public/templates/suppliers/
+  sheetName: string;
+  dataStartRow: number;    // 数据区起始行（表头下一行）
+  maxCol: number;
+  ready: boolean;          // 安邦=false
+  fillHeader(ws: ExcelJS.Worksheet, top: EttongTopInfo, opts: YxConvertOptions, items: EttongItem[]): void;
+  mapItem(item: EttongItem, top: EttongTopInfo, ctx: YxMapContext): (string | number)[];
+  channelSheet?: { name: string; col: number; skipHeader?: boolean };
+  /** 货箱编号累计区间按此键分组重置（美琦用：同一个 FBA 货件的单号连续累加，换单号重新从 1 起） */
+  groupKey?: (item: EttongItem) => string;
+}
+
+const YX_SUPPLIERS: Record<YxSupplierKey, YxSupplierSpec> = {
+  // ── 天图：B1 服务 / B2 仓库 / B11 国家 / B14 订单号 / B16 带电 / B17 带磁 / B18 交税 / B19 报关 / B22 总箱数 ──
+  天图: {
+    key: "天图",
+    templateFile: "天图-模板.xlsx",
+    sheetName: "Sheet1",
+    dataStartRow: 30,
+    maxCol: 18,
+    ready: true,
+    fillHeader(ws, top, opts) {
+      ws.getCell(1, 2).value = opts.channelName;                 // B1 服务
+      ws.getCell(2, 2).value = top.warehouseCode;                // B2 仓库代码(触发 VLOOKUP 带出地址)
+      ws.getCell(11, 2).value = countryCode(top.country);        // B11 收件人国家代码
+      ws.getCell(14, 2).value = opts.customerOrderNo;            // B14 客户订单号
+      if (top.hasBattery) ws.getCell(16, 2).value = top.hasBattery; // B16 带电
+      if (top.hasMagnet) ws.getCell(17, 2).value = top.hasMagnet;   // B17 带磁
+      ws.getCell(18, 2).value = yxTaxFor(top.clearance);         // B18 交税方式
+      ws.getCell(19, 2).value = yxCustomsFor(top.customs);       // B19 报关方式
+      ws.getCell(22, 2).value = top.totalBoxes;                  // B22 总箱数
+    },
+    mapItem(it) {
+      return [
+        it.boxId, it.refId, it.nameEn, it.nameCh,
+        excelPrec(it.unitPrice), it.totalQty, excelPrec(it.totalPrice),
+        it.material, it.hsCode, it.use, it.brand, it.model,
+        urlOrZero(it.image), urlOrZero(it.link),
+        it.grossWeight, it.lengthCm, it.widthCm, it.heightCm,
+      ];
+    },
+    channelSheet: { name: "Sheet2", col: 1 },
+  },
+
+  // ── 星链：sheet 美中北（多仓库同名结构，默认取美中北），数据 20 列 ──
+  星链: {
+    key: "星链",
+    templateFile: "模板转换/星链-美国模板.xlsx",
+    sheetName: "美中北",
+    dataStartRow: 18,
+    maxCol: 20,
+    ready: true,
+    fillHeader(ws, top, opts, items) {
+      const first = items[0];
+      ws.getCell(4, 2).value = first.boxId;                       // B4 FBA编号
+      ws.getCell(5, 2).value = first.refId;                       // B5 货物追踪编号
+      ws.getCell(6, 2).value = opts.channelName;                  // B6 收货渠道
+      ws.getCell(7, 2).value = countryCode(top.country);          // B7 目的地(用于 INDIRECT 选地址表)
+      ws.getCell(9, 2).value = yxXinglianCustomsFor(top.customs); // B9 报关类型
+      ws.getCell(10, 2).value = "否";                             // B10 是否投保
+      ws.getCell(11, 2).value = "不投保";                         // B11 投保类型
+      ws.getCell(12, 6).value = top.warehouseCode;                // F12 FBA仓库码
+    },
+    mapItem(it, top, ctx) {
+      return [
+        ctx.index + 1,            // A 箱序号
+        it.boxId,                 // B FBA ID
+        it.refId,                 // C POAnumber/货物追踪编号
+        it.nameCh,                // D 中文名
+        it.nameEn,                // E 英文名
+        it.netWeight,             // F (单个产品)净重
+        it.totalQty,              // G (单箱)数量
+        it.unitPrice,             // H 申报单价
+        it.currency || "USD",     // I 申报币别
+        it.material,              // J 材质(英文)
+        it.use,                   // K 用途(英文)
+        hsCodeForLs(it.hsCode),   // L 海关编码
+        it.grossWeight,           // M 单件实重
+        it.lengthCm,              // N 长
+        it.widthCm,               // O 宽
+        it.heightCm,              // P 高
+        urlOrZero(it.image),      // Q 产品图片
+        top.hasBattery,           // R 是否带电
+        top.hasMagnet,            // S 是否带磁
+        urlOrZero(it.link),       // T 销售链接
+      ];
+    },
+    channelSheet: { name: "US", col: 1, skipHeader: true },
+  },
+
+  // ── 皓鹏：B1 服务 / B2 地址库编码 / B10 国家 / B13 订单号 / B14 箱数 / F5 报关 / F6 交税 / F7 币种 / F13 PO ──
+  皓鹏: {
+    key: "皓鹏",
+    templateFile: "皓鹏-模板.xlsx",
+    sheetName: "单票下单-填写表",
+    dataStartRow: 19,
+    maxCol: 20,
+    ready: true,
+    fillHeader(ws, top, opts, items) {
+      const first = items[0];
+      ws.getCell(1, 2).value = opts.channelName;                    // B1 服务
+      ws.getCell(2, 2).value = top.warehouseCode;                   // B2 地址库编码
+      ws.getCell(10, 2).value = countryCode(top.country);           // B10 收件人国家代码
+      ws.getCell(13, 2).value = opts.customerOrderNo;               // B13 客户订单号
+      ws.getCell(14, 2).value = top.totalBoxes;                     // B14 箱数
+      ws.getCell(5, 6).value = yxHaopengCustomsFor(top.customs);    // F5 报关方式
+      ws.getCell(6, 6).value = yxTaxFor(top.clearance);             // F6 交税方式
+      ws.getCell(7, 6).value = yxCurrencyFor(first.currency);       // F7 申报币种
+      ws.getCell(13, 6).value = first.refId;                        // F13 PO Number
+    },
+    mapItem(it, _top, ctx) {
+      return [
+        `${ctx.boxPrefix}U${String(ctx.index + 1).padStart(6, "0")}`, // A 货箱编号
+        it.nameEn,                // B 英文品名
+        it.nameCh,                // C 中文品名
+        it.totalQty,              // D 申报数量(单箱)
+        "个",                     // E 申报单位
+        it.unitPrice,             // F 申报单价
+        it.grossWeight,           // G 货箱重量
+        it.lengthCm,              // H 长
+        it.widthCm,               // I 宽
+        it.heightCm,              // J 高
+        hsCodeForLs(it.hsCode),   // K 海关编码
+        it.brand,                 // L 品牌
+        it.material,              // M 材质
+        it.model,                 // N 型号
+        it.use,                   // O 用途
+        urlOrZero(it.link),       // P 销售链接
+        urlOrZero(it.image),      // Q 产品图片
+        it.netWeight,             // R 产品重量(每pcs)
+        it.sku,                   // S SKU
+        it.refId,                 // T po Number
+      ];
+    },
+    channelSheet: { name: "2026.8.27 服务渠道表", col: 3 },
+  },
+
+  // ── 美琦：与 LS 美线发票同构(18 列)，区别仅在 A 列用累计区间「起-止」 ──
+  美琦: {
+    key: "美琦",
+    templateFile: "模板转换/美琦-美线模板.xlsx",
+    sheetName: "发票",
+    dataStartRow: 19,
+    maxCol: 18,
+    ready: true,
+    fillHeader(ws, top, opts) {
+      ws.getCell(1, 2).value = opts.customerOrderNo;       // B1 客户订单号
+      ws.getCell(2, 2).value = opts.customerOrderNo;       // B2 客户参考号
+      ws.getCell(3, 2).value = opts.channelName;           // B3 服务
+      ws.getCell(4, 2).value = top.warehouseCode;          // B4 地址库编码(触发 VLOOKUP)
+      ws.getCell(14, 2).value = top.hasBattery;            // B14 带电
+      ws.getCell(15, 2).value = top.hasMagnet;             // B15 带磁
+      ws.getCell(16, 2).value = lsCustomsFor(top.customs); // B16 报关方式
+      ws.getCell(17, 2).value = top.totalBoxes;            // B17 箱数
+      ws.getCell(1, 5).value = "清溪仓";                   // E1 预计交货站点(默认)
+      writePickupDate(ws.getCell(2, 5));                    // E2 预计提货时间(今天)
+      ws.getCell(3, 5).value = "上门提货";                 // E3 提货方式
+    },
+    mapItem(it, _top, ctx) {
+      const perBox = it.boxCount ? r2(it.totalQty / it.boxCount) : 0;
+      const start = ctx.cumulativeStart + 1;
+      const end = ctx.cumulativeStart + it.boxCount;
+      return [
+        `${start}-${end}`,        // A 货箱编号(累计区间)
+        it.nameEn,                // B 英文品名
+        it.nameCh,                // C 中文品名
+        perBox,                   // D 单箱数量
+        it.unitPrice,             // E 单价
+        it.grossWeight,           // F 货箱重量(毛重原值)
+        r2(it.lengthCm - 1),      // G 长 -1
+        r2(it.widthCm - 1),       // H 宽 -1
+        r2(it.heightCm - 1),      // I 高 -1
+        hsCodeForLs(it.hsCode),   // J 海关编码
+        it.brand,                 // K 品牌
+        it.material,              // L 材质
+        it.model,                 // M 型号
+        it.use,                   // N 用途
+        0,                        // O 产品图片(固定 0)
+        it.refId,                 // P PO Number
+        it.boxCount,              // Q 物品箱号
+        it.boxId,                 // R 物品 FBA ID
+      ];
+    },
+    channelSheet: { name: "服务渠道", col: 2, skipHeader: true },
+    // 同一个 FBA 货件的单号(货件追踪编码)箱号连续累加；换单号重新从 1 起
+    groupKey: (it) => it.refId || it.boxId,
+  },
+
+  // ── 安邦：暂无模板，占位 ──
+  安邦: {
+    key: "安邦",
+    templateFile: "",
+    sheetName: "",
+    dataStartRow: 1,
+    maxCol: 1,
+    ready: false,
+    fillHeader() {},
+    mapItem() {
+      return [];
+    },
+  },
+};
+
+/** 供应商列表（供前端渲染下拉） */
+export const YX_SUPPLIER_KEYS: YxSupplierKey[] = ["天图", "星链", "皓鹏", "美琦", "安邦"];
+
+const yxChannelCache = new Map<YxSupplierKey, string[]>();
+
+/** 从供应商模板的渠道 sheet 解析渠道名（供前端下拉），结果去重并缓存 */
+export async function parseYxChannels(supplier: YxSupplierKey): Promise<string[]> {
+  const spec = YX_SUPPLIERS[supplier];
+  if (!spec || !spec.ready || !spec.channelSheet) return [];
+  const cached = yxChannelCache.get(supplier);
+  if (cached) return cached;
+
+  const tplPath = path.join(process.cwd(), "public", "templates", "suppliers", spec.templateFile);
+  if (!fs.existsSync(tplPath)) return [];
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.readFile(tplPath);
+  const ws = wb.getWorksheet(spec.channelSheet.name);
+  if (!ws) return [];
+
+  const channels: string[] = [];
+  const seen = new Set<string>();
+  const startRow = spec.channelSheet.skipHeader ? 2 : 1;
+  for (let r = startRow; r <= ws.rowCount; r++) {
+    const v = cellText(ws.getCell(r, spec.channelSheet.col));
+    if (v && !seen.has(v)) {
+      seen.add(v);
+      channels.push(v);
+    }
+  }
+  yxChannelCache.set(supplier, channels);
+  return channels;
+}
+
+/** 单张转换：易通标准模板 → 指定供应商发票 */
+export async function convertYxToSupplier(
   filePath: string,
   sourceFileName: string,
-  customerOrderNo: string,
-  channelName: string
+  supplier: YxSupplierKey,
+  opts: YxConvertOptions
 ): Promise<YxConvertResult> {
+  const spec = YX_SUPPLIERS[supplier];
+  if (!spec) throw new YxValidationError(`未知供应商：${supplier}`);
+  if (!spec.ready) throw new YxValidationError(`供应商「${supplier}」暂未提供模板，无法转换`);
+
   // ── 1. 解析易通源 ──
   const { top, items } = await parseEttongSource(filePath);
   if (items.length === 0) throw new Error("易通标准模板中未找到有效货箱数据");
 
-  // ── 2. 加载天图模板 ──
-  const tplPath = path.join(process.cwd(), "public", "templates", "suppliers", "天图-模板.xlsx");
-  if (!fs.existsSync(tplPath)) throw new Error(`天图模板不存在: ${tplPath}`);
+  // ── 2. 加载供应商模板 ──
+  const tplPath = path.join(process.cwd(), "public", "templates", "suppliers", spec.templateFile);
+  if (!fs.existsSync(tplPath)) throw new Error(`供应商模板不存在: ${tplPath}`);
   const outWb = new ExcelJS.Workbook();
   await outWb.xlsx.readFile(tplPath);
-  const ws = outWb.getWorksheet("Sheet1");
-  if (!ws) throw new Error("天图模板中找不到「Sheet1」工作表");
+  const ws = outWb.getWorksheet(spec.sheetName);
+  if (!ws) throw new Error(`模板中找不到「${spec.sheetName}」工作表`);
 
   // ── 3. 填充顶部字段 ──
-  ws.getCell(1, 2).value = channelName;               // B1 服务
-  ws.getCell(2, 2).value = top.warehouseCode;         // B2 仓库代码(触发 VLOOKUP 带出地址)
-  ws.getCell(11, 2).value = countryCode(top.country); // B11 收件人国家代码
-  ws.getCell(14, 2).value = customerOrderNo;          // B14 客户订单号
-  if (top.hasBattery) ws.getCell(16, 2).value = top.hasBattery; // B16 带电
-  if (top.hasMagnet) ws.getCell(17, 2).value = top.hasMagnet;   // B17 带磁
-  ws.getCell(18, 2).value = yxTaxFor(top.clearance);  // B18 交税方式
-  ws.getCell(19, 2).value = yxCustomsFor(top.customs); // B19 报关方式
-  ws.getCell(22, 2).value = top.totalBoxes;           // B22 总箱数
+  spec.fillHeader(ws, top, opts, items);
 
   // ── 4. 数据区（先清空模板示例数据行）──
-  const dataStart = 30;
+  const dataStart = spec.dataStartRow;
   const rowsToDelete = ws.actualRowCount - dataStart + 1;
   if (rowsToDelete > 0) ws.spliceRows(dataStart, rowsToDelete);
 
+  const boxPrefix = yxBoxPrefix(opts.customerOrderNo, items);
+  let cumulative = 0;
+  let currentGroup = ""; // 当前 FBA 分组键（美琦货箱编号累计区间按此重置）
   for (let i = 0; i < items.length; i++) {
-    const it = items[i];
+    const item = items[i];
+    if (spec.groupKey) {
+      const gk = spec.groupKey(item);
+      if (gk !== currentGroup) {
+        currentGroup = gk;
+        cumulative = 0; // 换 FBA 货件，箱号重新从 1 起
+      }
+    }
     const row = ws.getRow(dataStart + i);
-    const values: (string | number)[] = [
-      it.boxId,                 // A 货箱编号
-      it.refId,                 // B PO Number
-      it.nameEn,                // C 英文品名
-      it.nameCh,                // D 中文品名
-      excelPrec(it.unitPrice),  // E 单个申报单价
-      it.totalQty,              // F 单箱申报数量
-      excelPrec(it.totalPrice), // G 单箱申报总价
-      it.material,              // H 材质
-      it.hsCode,                // I 海关编码(文本)
-      it.use,                   // J 用途
-      it.brand,                 // K 品牌
-      it.model,                 // L 型号
-      urlOrZero(it.image),      // M 图片链接
-      urlOrZero(it.link),       // N 销售链接
-      it.grossWeight,           // O 货箱重量
-      it.lengthCm,              // P 长
-      it.widthCm,               // Q 宽
-      it.heightCm,              // R 高
-    ];
+    const values = spec.mapItem(item, top, {
+      index: i,
+      cumulativeStart: cumulative,
+      boxPrefix,
+    });
     values.forEach((v, ci) => {
       if (v !== null && v !== undefined && v !== "") row.getCell(ci + 1).value = v;
     });
-    for (let c = 1; c <= 18; c++) {
+    for (let c = 1; c <= spec.maxCol; c++) {
       row.getCell(c).border = {
         top: { style: "thin" },
         left: { style: "thin" },
@@ -624,23 +936,119 @@ export async function convertYxToTiantu(
         right: { style: "thin" },
       };
     }
+    cumulative += item.boxCount;
   }
 
   // ── 5. 输出 ──
   const buffer = Buffer.from(await outWb.xlsx.writeBuffer());
-  const fileName = `${sanitizeFileName(customerOrderNo || "未命名")}.xlsx`;
+  const baseName =
+    opts.customerOrderNo ||
+    yxBoxPrefix("", items) ||
+    path.basename(sourceFileName, path.extname(sourceFileName)) ||
+    "未命名";
+  const fileName = `${sanitizeFileName(baseName)}.xlsx`;
 
   const warnings: string[] = [];
   if (!top.warehouseCode) warnings.push("源模板缺少仓库代码");
+  if (supplier === "皓鹏") {
+    warnings.push("皓鹏收件地址字段为模板示例值，需人工核对或从地址库编码表填充");
+  }
 
   return {
     sourceFile: sourceFileName,
     fileName,
-    customerOrderNo,
+    supplier,
+    customerOrderNo: opts.customerOrderNo,
     warehouseCode: top.warehouseCode,
     totalBoxes: top.totalBoxes,
     dataRows: items.length,
     warnings,
     buffer,
   };
+}
+
+/** 批量转换：同国家校验通过后逐张转换并打包 ZIP */
+export async function convertYxBatch(
+  files: { path: string; name: string }[],
+  supplier: YxSupplierKey,
+  opts: YxConvertOptions
+): Promise<YxBatchResult> {
+  const spec = YX_SUPPLIERS[supplier];
+  if (!spec || !spec.ready) throw new YxValidationError(`供应商「${supplier}」暂未提供模板，无法转换`);
+  if (files.length === 0) throw new YxValidationError("未提供待转换文件");
+
+  // ── 校验：所有源文件国家一致 ──
+  const countries = new Set<string>();
+  for (const f of files) {
+    const { top, items } = await parseEttongSource(f.path);
+    if (items.length === 0) throw new YxValidationError(`「${f.name}」未找到有效货箱数据`);
+    countries.add(top.country || "未识别");
+  }
+  if (countries.size > 1) {
+    throw new YxValidationError(
+      `批量转换仅支持同一国家的发票，检测到 ${[...countries].join("、")} 等多个国家，请分开上传`
+    );
+  }
+  const country = [...countries][0] || "";
+
+  // ── 逐张转换 + ZIP 打包 ──
+  const zip = new JSZip();
+  const outFiles: YxBatchFile[] = [];
+  const warnings: string[] = [];
+  const usedNames = new Map<string, number>();
+
+  for (const f of files) {
+    const result = await convertYxToSupplier(f.path, f.name, supplier, opts);
+
+    let zipName = result.fileName;
+    const dup = usedNames.get(result.fileName) || 0;
+    if (dup > 0) {
+      const ext = path.extname(zipName);
+      const stem = zipName.slice(0, zipName.length - ext.length);
+      zipName = `${stem}(${dup})${ext}`;
+    }
+    usedNames.set(result.fileName, (usedNames.get(result.fileName) || 0) + 1);
+
+    zip.file(zipName, result.buffer);
+    outFiles.push({
+      sourceFile: result.sourceFile,
+      fileName: result.fileName,
+      country,
+      warehouseCode: result.warehouseCode,
+      totalBoxes: result.totalBoxes,
+      dataRows: result.dataRows,
+    });
+    for (const w of result.warnings) warnings.push(`[${f.name}] ${w}`);
+  }
+
+  zip.file(
+    "转换结果汇总.json",
+    JSON.stringify(
+      { supplier, channelName: opts.channelName, country, files: outFiles, warnings },
+      null,
+      2
+    )
+  );
+
+  const buffer = Buffer.from(await zip.generateAsync({ type: "nodebuffer" }));
+  const base = opts.customerOrderNo || sanitizeFileName(country) || "延讯批量";
+  return {
+    sourceFiles: files.map((f) => f.name),
+    zipFileName: `${base}-${supplier}批量转换.zip`,
+    supplier,
+    country,
+    files: outFiles,
+    warnings,
+    buffer,
+  };
+}
+
+/** 兼容旧调用：天图单张转换 */
+export async function convertYxToTiantu(
+  filePath: string,
+  sourceFileName: string,
+  customerOrderNo: string,
+  channelName: string
+): Promise<YxConvertResult> {
+  return convertYxToSupplier(filePath, sourceFileName, "天图", { customerOrderNo, channelName });
 }
