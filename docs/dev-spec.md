@@ -673,11 +673,11 @@ interface PacificSplitResult {
 
 ### 3.16 TR转供应商模板 — `/tr-to-supplier`
 
-**文件**: `src/app/tr-to-supplier/page.tsx` + `src/lib/tr-to-supplier.ts` + `src/app/api/tr-to-supplier/route.ts`
+**文件**: `src/app/tr-to-supplier/page.tsx` + `src/lib/tr-to-supplier.ts` + `src/app/api/tr-to-supplier/route.ts` + `src/app/api/tr-to-supplier/channels/route.ts`
 
 #### 功能
 
-上传 TR 客户发票（Page1 sheet），选择供应商（凯鑫/英美/星链/航乐），填写客户订单号 + 渠道名，按供应商下单模板逐列映射输出发票。凯鑫/航乐自动嵌入产品图片（WPS DISPIMG）。
+上传 TR 客户发票（Page1 sheet），**可批量一次上传多份**（同一供应商 + 同一渠道）。选择供应商（凯鑫/英美/星链/航乐）后「渠道」变为下拉（从供应商模板渠道 sheet 读取，单一数据源）；客户订单号可选（批量模式留空、单份可选填）。按供应商下单模板逐列映射输出发票，凯鑫/航乐自动嵌入产品图片（WPS DISPIMG）。输出为 ZIP：N 份供应商发票（根目录）+ N 份「易通系统上传」发票（`易通系统上传/` 子文件夹，源发票第 8 行插入空行，第 8 行起全部下移一行）。
 
 #### 核心业务规则（以答案文件反推）
 
@@ -690,8 +690,9 @@ interface PacificSplitResult {
 
 #### API
 
-- `POST /api/tr-to-supplier`：formData `file` + `supplier` + `customerOrderNo` + `channelName` → `{ sessionId, result }`
-- `GET /api/tr-to-supplier?session=xxx`：下载转换结果（30 分钟 session 过期）
+- `POST /api/tr-to-supplier`：formData `file`（可多个，`formData.getAll("file")`）+ `supplier` + `channelName`（必填）+ `customerOrderNo`（可选）→ `{ sessionId, result }`，`result` 含 `{ zipFileName, supplier, channel, total, files[], downloadUrl }`
+- `GET /api/tr-to-supplier?session=xxx`：下载 ZIP（30 分钟 session 过期）
+- `GET /api/tr-to-supplier/channels?supplier=xxx`：返回 `{ supplier, channels[] }` 供前端渠道下拉（从模板读取，服务端内存缓存）
 
 ---
 
@@ -1351,6 +1352,14 @@ interface PacificSplitResult {
     - **图片/链接列 `'0'` 字符串 vs 数值 0**：源 U/V 列数值 0 经 `cellText` 转成字符串 `"0"`，`it.image || 0` 会原样返回 `"0"` 而非数值 0，与答案的类型不一致。修复：`urlOrZero(v)` 把空串/`"0"` 归一为数值 `0`。
     - **总价浮点尾差**：源 J 列总价带尾差（`25.759999999999952` = 16 位有效数字），答案经 Excel 存成 15 位有效数字（`25.76`）。修复：`excelPrec(v) = Number(v.toPrecision(15))` 对单价/总价统一对齐 Excel 精度。
     - 位置：`src/lib/ettong-to-supplier.ts`（`urlOrZero` / `excelPrec` / `convertYxToTiantu`）
+
+100. **TR转供应商：批量上传 + 渠道下拉 + 易通系统上传发票（第 8 行插入空行）** (2026-10-17)
+    - **批量 ZIP**：POST `/api/tr-to-supplier` 改为 `formData.getAll("file")` 接收多份，逐份转换后打 ZIP（供应商发票在根目录、易通发票在 `易通系统上传/` 子文件夹），30 分钟内存 session 返回 `downloadUrl`。同批内源文件同名时 `uniqueName()` 追加 `(1)`/`(2)` 避免 ZIP 覆盖。
+    - **客户订单号可选**：批量模式（>1 份）留空、由用户导出后手动补填；单份可选填。留空时 B14/B3 清空模板示例值、输出文件名回退为**源文件名**（`path.basename` 去扩展名）。
+    - **渠道下拉单一数据源**：渠道不硬编码，运行时 `getSupplierChannels()` 从供应商模板渠道 sheet 读取（凯鑫`服务名称`B列 / 英美`渠道列表`B列 / 星链`US忽略`+`AU忽略`A列 / 航乐`Sheet1`+`Sheet2`A列）。**坑**：星链/航乐的渠道 sheet 用垂直合并（渠道名只在块首出现一次），须按「非空值去重」读取，否则会得到整列行数（星链实际 8 条而非 ~1331）。
+    - **易通发票用原始 XML 行位移而非 ExcelJS 重写**：源 TR 发票含浮动图片（`xl/drawings/drawing1.xml` + `xl/media/*`），ExcelJS 重写会丢图片。`buildEttonInvoice()` 用 JSZip 直接改 zip：`xl/worksheets/sheetN.xml` 的行号（`<row r>`/`<c r>`/`<mergeCell ref>`/`<dimension ref>`）≥8 部分 +1、`drawing1.xml` 的 `<xdr:row>`（0 基 ≥7）+1，media 原样保留。`resolveWorksheetTarget()` 经 workbook.xml + rels 把 sheet 名解析成 `xl/worksheets/sheetN.xml`。
+    - **已知限制**：行位移只处理单张 `drawing1.xml`；若源文件有多张 drawing 需扩展。
+    - 位置：`src/lib/tr-to-supplier.ts`（`getSupplierChannels` / `buildEttonInvoice` / `resolveWorksheetTarget` / `shiftRowRefsInSheetXml` / `shiftRowsInDrawingXml`）、`src/app/api/tr-to-supplier/route.ts`、`src/app/api/tr-to-supplier/channels/route.ts`、`src/app/tr-to-supplier/page.tsx`
 
 ### 待重构项
 

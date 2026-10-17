@@ -1,13 +1,16 @@
 # TR转供应商模板 — 功能规格文档
 
-> 最后更新: 2026-10-15 | 维护者: berry-bi
+> 最后更新: 2026-10-17 | 维护者: berry-bi
 
 ## 1. 功能概述
 
 **TR转供应商模板**（`/tr-to-supplier`）把 TR 客户发票（Page1 sheet）自动转换为供应商下单模板格式，消除手动「TR 客户发票 → 供应商模板粘贴」的重复劳动。支持 4 家供应商：**凯鑫 / 英美 / 星链 / 航乐**。
 
-- **输入**: TR 客户发票 Excel（`.xlsx`，`Page1` sheet）
-- **输出**: 按所选供应商模板输出的下单发票（`<客户订单号>.xlsx`）；凯鑫 / 航乐自动嵌入产品图片（WPS DISPIMG）
+- **输入**: TR 客户发票 Excel（`.xlsx`，`Page1` sheet），**可批量一次上传多份**（同一供应商 + 同一渠道）
+- **界面输入**: 供应商（下拉）、渠道（下拉，按供应商从模板读取）、客户订单号（可选，仅单份时显示）
+- **输出**: ZIP 包，含
+  - N 份供应商下单发票（`<客户订单号 或 源文件名>.xlsx`）；凯鑫 / 航乐自动嵌入产品图片（WPS DISPIMG）
+  - N 份「易通系统上传」发票（子文件夹 `易通系统上传/`，保留源文件名）——源发票第 8 行插入空行（第 8 行起全部下移一行）
 
 ## 2. 输入格式 — TR 客户发票
 
@@ -53,6 +56,7 @@ ASIN(X)。
 - **交税/是否包税**：清关方式「自税」→ 凯鑫 `自税递延` / 航乐 `不包税递延`；「不包税」→ 不包税
 - **收件地址**：模板内 VLOOKUP 公式（凯鑫/英美）或 INDIRECT 选表（星链），写仓库代码自动带出，转换器不手动填地址
 - **带电/带磁/币种**：原值透传
+- **客户订单号**：留空则 B14/B3 清空（清除模板示例值）、输出按源文件名命名；填写则写入 B14/B3 并作为文件名
 
 ### 3.2 凯鑫（发票 sheet，数据区 R28 起，19 列）
 
@@ -74,30 +78,60 @@ ASIN(X)。
 - 顶部：B3 收件地址(仓库代码)、G3 国家、H3 SHIPMENT ID(逗号连接货箱编号)、K3 AMAZON REFERENCE ID(逗号连接 refId)、B4 ZIP(邮编)、B5 CITY(仓库地址)、D5 ATTN(亚马逊)、I5 报关类型、K5 交货仓库(广州白云仓)、B7 公司名称、I7 渠道、L7 是否包税、M7 物品属性、B8 VAT、B9 EORI、B10 VAT注册地址
 - 数据列 A–X：货箱编号 / 中文品名 / 英文品名 / 材质(中) / 材质(英) / 海关编码(数值) / 型号 / 品牌 / 用途 / 单箱数量 / 总数量 / 净重(单个=净重÷单箱数量) / 实重 / 单价 / 总价 / 长 / 宽 / 高 / 材重(长×宽×高÷6000) / CBM(长×宽×高÷1e6) / 带电 / 带磁 / 图片(DISPIMG) / 链接
 
-## 4. 图片处理（凯鑫 / 航乐）
+## 4. 渠道下拉（从供应商模板读取，单一数据源）
+
+渠道列表不是硬编码，运行时从各供应商模板的渠道 sheet 读取并去重（模板即数据源，改模板即改下拉）：
+
+| 供应商 | 渠道 sheet | 列 |
+|--------|-----------|-----|
+| 凯鑫 | 服务名称 | B 列（R2 起） |
+| 英美 | 渠道列表 | B 列（R2 起，A 列为分类） |
+| 星链 | US忽略 + AU忽略 | A 列（R2 起，垂直合并，仅表头有值） |
+| 航乐 | Sheet2 + Sheet1 | A 列（R1 起，无表头） |
+
+> 注：星链/航乐的渠道 sheet 用垂直合并单元格（同一渠道名只在块首出现一次），因此按「非空值去重」读取，得到的是**去重后的渠道清单**（星链约 8 条、航乐约 34 条），而非整列行数。
+
+## 5. 图片处理（凯鑫 / 航乐）
 
 - 图片列写 `=_xlfn.DISPIMG("ID_xxx",1)` 公式；图片实体在写 buffer 后经 JSZip 后处理注入：
   `xl/cellimages.xml` + `xl/media/imageN.png` + `xl/_rels/cellimages.xml.rels` + workbook.xml.rels 的 `cellImage` 关系 + `[Content_Types].xml` override
 - 源图片从 TR 发票 `xl/drawings/drawing1.xml` 的 `twoCellAnchor`（V 列 col21 主图 / W 列 col22 兜底）按数据行锚定提取
 - 英美/星链图片列留空
 
-## 5. API 接口
+## 6. 易通系统上传发票（第 8 行插入空行）
+
+每份源发票额外生成一份「易通系统上传」发票，与源发票唯一差异是**原第 8 行插入空行**（第 8 行及以下全部下移一行，原第 8 行内容移到第 9 行）。目的：对齐易通上传模板比 TR 客户发票多一行偏移。
+
+实现为 **xlsx 原始 XML 行位移**（非 ExcelJS 重写），以保留源文件浮动图片 / 合并单元格 / 格式：
+
+- `xl/worksheets/sheetN.xml`：`<row r="N">`、`<c r="ColN">`、`<mergeCell ref="...">`、`<dimension ref="...">` 中行号 ≥ 8 的部分 +1
+- `xl/drawings/drawing1.xml`：`<xdr:row>`（0 基行号 ≥ 7）锚点 +1，图片随之移动
+- 图片实体 `xl/media/*` 原样保留
+
+## 7. API 接口
 
 ### POST `/api/tr-to-supplier`
 
-- **输入**: `multipart/form-data`：`file`（单文件 `.xlsx`）、`supplier`（凯鑫/英美/星链/航乐）、`customerOrderNo`（必填）、`channelName`
-- **输出**: JSON `{ sessionId, result }`，`result` 含 `{ sourceFile, fileName, supplier, customerOrderNo, warehouseCode, totalBoxes, dataRows, warnings, downloadUrl }`
+- **输入**: `multipart/form-data`：`file`（可多个，`formData.getAll("file")`）、`supplier`（凯鑫/英美/星链/航乐）、`channelName`（必填，来自渠道下拉）、`customerOrderNo`（可选）
+- **输出**: JSON `{ sessionId, result }`，`result` 含 `{ zipFileName, supplier, channel, total, files[], downloadUrl }`；`files[]` 每项 `{ sourceFile, supplierFile, ettongFile, warehouseCode, totalBoxes, dataRows, warnings }`
 - **限制**: `bodyParser.sizeLimit = "50mb"`
 
 ### GET `/api/tr-to-supplier?session=xxx`
 
-- 下载转换结果（`Content-Disposition` 含 UTF-8 文件名）
+- 下载转换结果 ZIP（`application/zip`，`Content-Disposition` 含 UTF-8 文件名）
 - **过期**: session 30 分钟无访问自动清除
 
-## 6. 已知限制
+### GET `/api/tr-to-supplier/channels?supplier=xxx`
 
-- 客户订单号、渠道名需人工输入（TR 发票无对应字段）
+- 返回 `{ supplier, channels[] }`，渠道清单供前端下拉（从模板读取，服务端内存缓存）
+
+## 8. 已知限制 / 非目标
+
+- 客户订单号在**批量模式（>1 份）下不填**（留空，由用户在导出后手动补填）；单份时可选填
+- 渠道下拉不按目的地国家二次过滤（星链 US/AU 合并显示，由用户自选匹配目的地的渠道）
 - 航乐「物品属性」按品名/用途关键词粗分类（灯类/玩具类/服装类/家居类），命中不到留空供人工补填
 - 航乐「交货仓库」固定为「广州白云仓」；「ATTN 收件人」固定为「亚马逊」
 - 航乐 VAT 注册地址的换行符转为空格（对齐答案文件）
 - 仅处理 `Page1` sheet；未找到有效箱单数据时报错
+- 易通发票行位移只处理 `xl/drawings/drawing1.xml`（单 drawing）；若源文件有多张 drawing 需扩展
+- 同批内源文件同名时，供应商/易通发票文件名自动追加 `(1)` `(2)` 避免 ZIP 覆盖

@@ -319,7 +319,7 @@ const SUPPLIERS: Record<SupplierKey, SupplierSpec> = {
       };
       b(1, opts.channelName);                 // 服务(渠道)
       b(2, top.warehouseCode);                // 地址库编码(触发 VLOOKUP 自动带出地址)
-      b(14, opts.customerOrderNo);            // 客户订单号
+      ws.getCell(14, 2).value = opts.customerOrderNo || null; // 客户订单号(留空则清空模板示例)
       b(15, top.hasBattery);                  // 带电
       b(16, top.hasMagnet);                   // 带磁
       b(17, customsFor("凯鑫", top.customs)); // 报关方式
@@ -369,7 +369,7 @@ const SUPPLIERS: Record<SupplierKey, SupplierSpec> = {
       };
       b(1, opts.channelName);                 // 服务
       b(2, top.warehouseCode);                // 地址库编码
-      b(14, opts.customerOrderNo);            // 客户订单号
+      ws.getCell(14, 2).value = opts.customerOrderNo || null; // 客户订单号(留空则清空模板示例)
       b(15, top.hasBattery);                  // 带电
       b(16, top.hasMagnet);                   // 带磁
       b(17, customsFor("英美", top.customs)); // 报关方式
@@ -416,7 +416,7 @@ const SUPPLIERS: Record<SupplierKey, SupplierSpec> = {
     rowHeight: 31.1,
     maxCol: 22,
     fillHeader(ws, top, opts) {
-      ws.getCell(3, 2).value = opts.customerOrderNo;   // B3 客户参考号2
+      ws.getCell(3, 2).value = opts.customerOrderNo || null; // B3 客户参考号2(留空则清空模板示例)
       ws.getCell(6, 2).value = opts.channelName;       // B6 收货渠道
       ws.getCell(7, 2).value = top.country;            // B7 目的地(用于 INDIRECT 选地址表)
       ws.getCell(8, 2).value = top.totalBoxes;         // B8 总件数
@@ -520,6 +520,64 @@ const SUPPLIERS: Record<SupplierKey, SupplierSpec> = {
     },
   },
 };
+
+// ============================================================
+// 渠道下拉数据(从供应商模板读取, 单一数据源)
+// ============================================================
+
+interface ChannelSheetSpec {
+  sheet: string;
+  col: number;      // 1-based 列号
+  startRow: number; // 数据起始行(1-based)
+}
+
+const CHANNEL_SHEETS: Record<SupplierKey, ChannelSheetSpec[]> = {
+  凯鑫: [{ sheet: "服务名称", col: 2, startRow: 2 }],
+  英美: [{ sheet: "渠道列表", col: 2, startRow: 2 }],
+  星链: [
+    { sheet: "US忽略", col: 1, startRow: 2 },
+    { sheet: "AU忽略", col: 1, startRow: 2 },
+  ],
+  航乐: [
+    { sheet: "Sheet2", col: 1, startRow: 1 },
+    { sheet: "Sheet1", col: 1, startRow: 1 },
+  ],
+};
+
+const channelsCache = new Map<SupplierKey, string[]>();
+
+/** 读取某供应商的渠道下拉列表(去重, 保持模板顺序) */
+export async function getSupplierChannels(supplier: SupplierKey): Promise<string[]> {
+  const cached = channelsCache.get(supplier);
+  if (cached) return cached;
+
+  const spec = SUPPLIERS[supplier];
+  const sheets = CHANNEL_SHEETS[supplier];
+  if (!spec || !sheets) throw new Error(`未知供应商: ${supplier}`);
+
+  const tplPath = path.join(process.cwd(), "public", "templates", "tr-suppliers", spec.templateFile);
+  if (!fs.existsSync(tplPath)) throw new Error(`供应商模板不存在: ${tplPath}`);
+
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.readFile(tplPath);
+
+  const seen = new Set<string>();
+  const channels: string[] = [];
+  for (const cs of sheets) {
+    const ws = wb.getWorksheet(cs.sheet);
+    if (!ws) continue;
+    for (let r = cs.startRow; r <= ws.rowCount; r++) {
+      const name = cellText(ws.getCell(r, cs.col));
+      if (name && !seen.has(name)) {
+        seen.add(name);
+        channels.push(name);
+      }
+    }
+  }
+
+  channelsCache.set(supplier, channels);
+  return channels;
+}
 
 // ============================================================
 // DISPIMG 注入
@@ -637,6 +695,8 @@ export async function convertTrToSupplier(
   const spec = SUPPLIERS[supplier];
   if (!spec) throw new Error(`未知供应商: ${supplier}`);
 
+  const orderNo = (customerOrderNo || "").trim();
+
   // ── 1. 解析 TR 源 ──
   const srcWb = new ExcelJS.Workbook();
   await srcWb.xlsx.readFile(filePath);
@@ -667,7 +727,7 @@ export async function convertTrToSupplier(
   if (!outSheet) throw new Error(`模板中找不到「${spec.sheetName}」工作表`);
 
   // ── 3. 填充订单头 ──
-  spec.fillHeader(outSheet, top, { customerOrderNo, channelName }, items);
+  spec.fillHeader(outSheet, top, { customerOrderNo: orderNo, channelName }, items);
 
   // ── 4. 填充数据区(先删除模板示例数据行) ──
   const dataStart = spec.headerStartRow;
@@ -713,16 +773,100 @@ export async function convertTrToSupplier(
     buffer = await injectDispimg(buffer, items.map((it) => it.image), imageIds);
   }
 
-  const fileName = `${sanitizeFileName(customerOrderNo || "未命名")}.xlsx`;
+  const baseName = orderNo || path.basename(sourceFileName, path.extname(sourceFileName));
+  const fileName = `${sanitizeFileName(baseName)}.xlsx`;
   return {
     sourceFile: sourceFileName,
     fileName,
     supplier,
-    customerOrderNo,
+    customerOrderNo: orderNo,
     warehouseCode: top.warehouseCode,
     totalBoxes: top.totalBoxes,
     dataRows: items.length,
     warnings: [],
     buffer,
   };
+}
+
+// ============================================================
+// 易通系统上传发票: 源发票第 8 行插入空行(第 8 行起全部下移一行), 保留图片/合并单元格/格式
+// ============================================================
+
+const ETON_INSERT_ROW = 8; // 1-based 行号: 在第 8 行插入空行
+
+function resolveWorksheetTarget(wbXml: string, relsXml: string, sheetName: string): string | null {
+  for (const m of wbXml.matchAll(/<sheet\b([^>]*)>/g)) {
+    const attrs = m[1];
+    const name = /name="([^"]*)"/.exec(attrs);
+    if (!name || name[1] !== sheetName) continue;
+    const rid = /r:id="([^"]+)"/.exec(attrs);
+    if (!rid) return null;
+    const rel = new RegExp(`<Relationship\\b[^>]*Id="${rid[1]}"[^>]*Target="([^"]+)"`).exec(relsXml);
+    if (!rel) return null;
+    const target = rel[1].replace(/^\/+/, "").replace(/^(\.\.\/)+/, "");
+    return "xl/" + target;
+  }
+  return null;
+}
+
+/** sheet XML: 将 fromRow(1-based) 起的行/单元格/合并单元格/尺寸范围全部下移一行 */
+function shiftRowRefsInSheetXml(xml: string, fromRow: number): string {
+  // 1. dimension 范围
+  xml = xml.replace(/<dimension ref="([A-Z]+)(\d+):([A-Z]+)(\d+)"/g, (m, c1, r1s, c2, r2s) => {
+    const r1 = parseInt(r1s, 10);
+    const r2 = parseInt(r2s, 10);
+    return `<dimension ref="${c1}${r1 >= fromRow ? r1 + 1 : r1}:${c2}${r2 >= fromRow ? r2 + 1 : r2}"`;
+  });
+  // 2. 行元素 <row r="N">
+  xml = xml.replace(/<row r="(\d+)"/g, (m, n) => {
+    const r = parseInt(n, 10);
+    return r >= fromRow ? `<row r="${r + 1}"` : m;
+  });
+  // 3. 单元格 <c r="ColN">
+  xml = xml.replace(/<c r="([A-Z]+)(\d+)"/g, (m, col, n) => {
+    const r = parseInt(n, 10);
+    return r >= fromRow ? `<c r="${col}${r + 1}"` : m;
+  });
+  // 4. 合并单元格 <mergeCell ref="ColN:ColN">
+  xml = xml.replace(/<mergeCell ref="([A-Z]+)(\d+):([A-Z]+)(\d+)"/g, (m, c1, r1s, c2, r2s) => {
+    const r1 = parseInt(r1s, 10);
+    const r2 = parseInt(r2s, 10);
+    return `<mergeCell ref="${c1}${r1 >= fromRow ? r1 + 1 : r1}:${c2}${r2 >= fromRow ? r2 + 1 : r2}"`;
+  });
+  return xml;
+}
+
+/** drawing XML: 浮动图片锚点(0-based row)下移一行 */
+function shiftRowsInDrawingXml(xml: string, fromRow: number): string {
+  const zeroBasedFrom = fromRow - 1;
+  return xml.replace(/<xdr:row>(\d+)<\/xdr:row>/g, (m, n) => {
+    const r = parseInt(n, 10);
+    return r >= zeroBasedFrom ? `<xdr:row>${r + 1}</xdr:row>` : m;
+  });
+}
+
+/** 生成「易通系统上传」发票 = 源发票第 8 行插入空行(保留原格式/图片/合并单元格) */
+export async function buildEttonInvoice(filePath: string): Promise<Buffer> {
+  const raw = fs.readFileSync(filePath);
+  const zip = await JSZip.loadAsync(raw);
+
+  const wbXml = (await zip.file("xl/workbook.xml")?.async("string")) || "";
+  const relsXml = (await zip.file("xl/_rels/workbook.xml.rels")?.async("string")) || "";
+  if (!wbXml || !relsXml) throw new Error("易通发票 xlsx 结构不完整");
+
+  const sheetPath = resolveWorksheetTarget(wbXml, relsXml, "Page1");
+  if (!sheetPath) throw new Error("易通发票中找不到「Page1」工作表");
+
+  const sheetFile = zip.file(sheetPath);
+  if (!sheetFile) throw new Error(`易通发票中找不到工作表文件: ${sheetPath}`);
+  zip.file(sheetPath, shiftRowRefsInSheetXml(await sheetFile.async("string"), ETON_INSERT_ROW));
+
+  // 浮动图片锚点同步下移
+  const drawingFile = zip.file("xl/drawings/drawing1.xml");
+  if (drawingFile) {
+    zip.file("xl/drawings/drawing1.xml", shiftRowsInDrawingXml(await drawingFile.async("string"), ETON_INSERT_ROW));
+  }
+
+  const out = await zip.generateAsync({ type: "nodebuffer" });
+  return Buffer.isBuffer(out) ? out : Buffer.from(out);
 }
