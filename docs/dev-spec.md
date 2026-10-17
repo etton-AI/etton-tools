@@ -109,12 +109,18 @@ ETTON 电商AI/
 
 **文件**: `src/app/page.tsx`
 
-纯展示型导航页，包含五个卡片链接：
+纯展示型导航页，包含十二个工具卡片链接：
 - `/insurance-split` — 保单投保区间拆分
 - `/pacific-convert` — 太平洋货箱清单转换
 - `/multi-supplier-reconciliation` — 多供应商对账引擎
 - `/pipixiong-split` — 皮皮熊账单拆分
 - `/yanxun-convert` — 延讯下单优化
+- `/tr-to-supplier` — TR转供应商模板
+- `/warehouse-entry` / `/warehouse-entry-full` — TR入仓数据整理（单票 / 全量）
+- `/bl-review` — 提单 + 电放保函
+- `/kuajingbao-insurance` — 跨境堡批量投保
+- `/ls-to-supplier` — 朗胜转美线下单映射
+- `/yx-to-tiantu` — 延讯转天图发票
 
 无服务端逻辑，纯客户端渲染。
 
@@ -705,6 +711,7 @@ interface PacificSplitResult {
 - ✅ **OCR 扫描件识别**（2026-09 已实现）：扫描底单（无文字层）用 RapidOCR（rapidocr_onnxruntime，中文识别准、比 tesseract 稳）识别，复用标签定位提取（提单号/船名航次/起运地/目的港/运抵国/箱数/品名/总重量/起运日期均可提取）
 - ❌ **英文自动翻译**: 提单/保函的英文字段（shipper 英文名+地址、consignee 英文、起运地/目的港英文、品名翻译、总体积、实际起运日期）底单里没有，靠人工在审核表补填，不做自动翻译/港口映射
   - ⚠️ 已部分放开：拓锐客户 shipper/consignee 英文为**固定常量硬编码**；品名英文翻译 + 总体积改由**箱货清单 xlsx** 自动汇总（`parse_packing_list`）。仍留人工的只有：起运地/目的港**英文**（底单是中文「阿拉山口铁路/英国」，提单要英文 `CHONGQING`/`MALASZEWICZE`）+ 实际起运日期（提单要实际开船/发车日，底单只有申报日期）。船名航次本身**在底单有**（「运输工具名称及航次号」列，海运为船名航次、非海运该列为 `@` 占位符→空）
+- ❌ **LS/YX 品名去重后缀 `-1`**: 天图/美线发票内重复「英文品名+单价+数量」行的 `-1` 去重后缀不自动生成（样本规则不一致，无法可靠推导，见已知坑 #99），如实透传品名，此类行人工复核
 
 ---
 
@@ -1333,6 +1340,17 @@ interface PacificSplitResult {
 97. **TR转供应商：航乐 VAT 注册地址换行转空格** (2026-10-15)
     - 源 B12 地址含 `\n`，但答案 `.xls` 里是空格；为逐格对齐答案，航乐 B10 写值前 `.replace(/\n/g, " ")`。
     - 位置：`src/lib/tr-to-supplier.ts` 航乐 `fillHeader`
+
+98. **朗胜(LS)转供应商：上传文件名中文被按本地代码页编码成乱码，导致 SO-SKU 表整名匹配失败** (2026-10-17)
+    - 症状：curl 在 Windows 控制台发送 multipart 时，文件名里的中文（如「易通」）按控制台代码页(GBK)编码，`rawFile.name` 拿到的是 mojibake，与 SO-SKU 表 A 列的 UTF-8 中文对不上，整名匹配失败 → 退化为 SKU 全局匹配 → 跨发票重复 SKU 取错 SO（如 `HP-HB-AZ01-W4` 错配到 `LSGKJ26090245` 而非 `LSGKJ26100033`）。浏览器正常（UTF-8），curl 复现。
+    - 修复：加 ASCII 稳定键 `invoiceKey(name)`（正则提取 `日期(YYYY-M-D) + 代码([A-Z]{2,5}\d{1,2})`，如 `2026-10-15LGB4`），匹配顺序改为「规范化整名 → 稳定键 → SKU 全局」。日期+代码是纯 ASCII 不受编码影响，最稳。
+    - 位置：`src/lib/ettong-to-supplier.ts`（`invoiceKey` / `parseSoSkuTable` 的 `groupsByKey` / `convertLsToSupplier` 三级 fallback）
+
+99. **延讯(YX)转天图：三处答案对齐细节** (2026-10-17)
+    - **品名去重后缀 `-1` 无法自动化**：当发票内「英文品名+单价+数量」完全相同的行重复出现，答案会手动给部分重复行加 `-1` 后缀（`Night light` → `Night light-1`）以区分；但样本规则不一致（`FBA19RCL9P6F` 只给第 2 个重复行加，`FBA19SBFD2G6` 给所有重复行加），无法从易通标准模板可靠推导 → 本功能**如实透传品名，不加后缀**，此类行需人工复核（10 个样本中 2 个受影响）。
+    - **图片/链接列 `'0'` 字符串 vs 数值 0**：源 U/V 列数值 0 经 `cellText` 转成字符串 `"0"`，`it.image || 0` 会原样返回 `"0"` 而非数值 0，与答案的类型不一致。修复：`urlOrZero(v)` 把空串/`"0"` 归一为数值 `0`。
+    - **总价浮点尾差**：源 J 列总价带尾差（`25.759999999999952` = 16 位有效数字），答案经 Excel 存成 15 位有效数字（`25.76`）。修复：`excelPrec(v) = Number(v.toPrecision(15))` 对单价/总价统一对齐 Excel 精度。
+    - 位置：`src/lib/ettong-to-supplier.ts`（`urlOrZero` / `excelPrec` / `convertYxToTiantu`）
 
 ### 待重构项
 

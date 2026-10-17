@@ -155,6 +155,35 @@ const TOOLS: Tool[] = [
       </svg>
     ),
   },
+  {
+    href: "/ls-to-supplier",
+    title: "朗胜转美线下单映射",
+    badge: "高效",
+    desc: "朗胜易通发票按 SKU 拆分，批量生成美线发票下单映射",
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M22 18H2" />
+        <path d="M5 18v-6" />
+        <path d="M11 18v-6" />
+        <path d="M17 18V8" />
+        <path d="M4 7l3 3 3-3" />
+        <path d="M15 3l3 3 3-3" />
+      </svg>
+    ),
+  },
+  {
+    href: "/yx-to-tiantu",
+    title: "延讯转天图发票",
+    badge: "高效",
+    desc: "延讯易通标准模板转天图供应商发票",
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="4" width="18" height="16" rx="2" />
+        <path d="M3 9h18" />
+        <path d="M9 9v11" />
+      </svg>
+    ),
+  },
 ];
 
 export default function HomePage() {
@@ -176,7 +205,7 @@ export default function HomePage() {
         </h1>
         <div className="scanline" />
         <p className="mt-6 text-[17px] tracking-[.5px] text-muted">
-          十款电商效率工具，把繁琐的表格处理变成一次点击。
+          十二款电商效率工具，把繁琐的表格处理变成一次点击。
         </p>
       </section>
 
