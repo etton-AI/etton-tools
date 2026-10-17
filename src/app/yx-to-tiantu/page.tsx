@@ -63,10 +63,12 @@ export default function YxToTiantuPage() {
   const [channels, setChannels] = useState<string[]>([]);
   const [channelsLoading, setChannelsLoading] = useState(false);
   const [channelName, setChannelName] = useState("");
+  const [channelOpen, setChannelOpen] = useState(false);
   const [customerOrderNo, setCustomerOrderNo] = useState("");
   const [result, setResult] = useState<ConvertResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const channelWrapRef = useRef<HTMLDivElement>(null);
 
   const isSupported = (name: string) => /\.(xlsx|xls)$/i.test(name);
 
@@ -95,6 +97,22 @@ export default function YxToTiantuPage() {
       cancelled = true;
     };
   }, [supplier]);
+
+  // 点击渠道输入框外部时收起下拉
+  useEffect(() => {
+    const onClickOutside = (e: MouseEvent) => {
+      if (channelWrapRef.current && !channelWrapRef.current.contains(e.target as Node)) {
+        setChannelOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onClickOutside);
+    return () => document.removeEventListener("mousedown", onClickOutside);
+  }, []);
+
+  const selectChannel = useCallback((c: string) => {
+    setChannelName(c);
+    setChannelOpen(false);
+  }, []);
 
   const convert = useCallback(async () => {
     if (files.length === 0) {
@@ -207,6 +225,9 @@ export default function YxToTiantuPage() {
   const single = result?.kind === "single" ? (result.result as SingleResult) : null;
   const batch = result?.kind === "batch" ? (result.result as BatchResult) : null;
 
+  const channelQuery = channelName.trim().toLowerCase();
+  const filteredChannels = channels.filter((c) => c.toLowerCase().includes(channelQuery));
+
   return (
     <div className="space-y-8">
       {/* Header */}
@@ -307,25 +328,45 @@ export default function YxToTiantuPage() {
                 ))}
               </select>
             </div>
-            <div>
+            <div ref={channelWrapRef} className="relative">
               <label className="mb-1.5 block text-sm font-medium text-zinc-700">
                 渠道 <span className="text-red-500">*</span>
               </label>
-              <select
+              <input
+                type="text"
                 value={channelName}
-                onChange={(e) => setChannelName(e.target.value)}
-                className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
+                onChange={(e) => {
+                  setChannelName(e.target.value);
+                  setChannelOpen(true);
+                }}
+                onFocus={() => setChannelOpen(true)}
+                placeholder={channelsLoading ? "渠道加载中..." : "输入关键字筛选渠道（如：美转加 / 19日）"}
                 disabled={channelsLoading}
-              >
-                <option value="">
-                  {channelsLoading ? "渠道加载中..." : "请选择渠道"}
-                </option>
-                {channels.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
+                className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
+              />
+              {channelOpen && !channelsLoading && filteredChannels.length > 0 && (
+                <ul className="absolute left-0 right-0 top-full z-20 mt-1 max-h-56 overflow-y-auto rounded-lg border border-zinc-200 bg-white py-1 shadow-lg">
+                  {filteredChannels.map((c) => (
+                    <li key={c}>
+                      <button
+                        type="button"
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          selectChannel(c);
+                        }}
+                        className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-primary/10"
+                      >
+                        {c}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {channelOpen && !channelsLoading && filteredChannels.length === 0 && (
+                <div className="absolute left-0 right-0 top-full z-20 mt-1 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-400 shadow-lg">
+                  无匹配渠道
+                </div>
+              )}
             </div>
             {files.length === 1 && (
               <div>
@@ -491,7 +532,7 @@ export default function YxToTiantuPage() {
       {!result && (
         <div className="rounded-lg border border-zinc-200 bg-white p-4 text-sm text-zinc-500">
           <p>
-            💡 提示：支持天图 / 星链 / 皓鹏 / 美琦 四家供应商（安邦待提供模板）。渠道名按供应商从模板自动解析为下拉列表；
+            💡 提示：支持天图 / 星链 / 皓鹏 / 美琦 四家供应商（安邦待提供模板）。渠道名按供应商从模板自动解析，可在输入框输入关键字（如「美转加」「19日」）实时筛选匹配项；
             批量上传时须保证所有发票为同一国家、同一渠道，客户订单号可留空（按 FBA 编号命名）。
             收件地址由模板内 VLOOKUP 公式根据仓库代码自动带出（皓鹏为静态示例值，需人工核对）。
           </p>
