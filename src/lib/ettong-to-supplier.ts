@@ -358,7 +358,8 @@ async function buildLsInvoice(
   top: EttongTopInfo,
   item: EttongItem,
   so: string,
-  opts: { channelName: string; pickupMethod: string; deliverySite: string }
+  opts: { channelName: string; pickupMethod: string; deliverySite: string },
+  boxRangeStart: number
 ): Promise<{ fileName: string; buffer: Buffer }> {
   const tplPath = path.join(process.cwd(), "public", "templates", "ls-yx", "美线发票下单映射-模板.xlsx");
   if (!fs.existsSync(tplPath)) throw new Error(`美线发票模板不存在: ${tplPath}`);
@@ -390,9 +391,11 @@ async function buildLsInvoice(
   if (rowsToDelete > 0) ws.spliceRows(dataStart, rowsToDelete);
 
   const perBox = item.boxCount ? r2(item.totalQty / item.boxCount) : 0;
+  const boxStart = boxRangeStart + 1;
+  const boxEnd = boxRangeStart + item.boxCount;
   const row = ws.getRow(dataStart);
   const values: (string | number)[] = [
-    `${item.boxId}U000001-${item.boxCount}`, // A 货箱编号
+    `${boxStart}-${boxEnd}`, // A 货箱编号(累计区间)
     item.nameEn,                            // B 英文品名
     item.nameCh,                            // C 中文品名
     perBox,                                 // D 单箱数量
@@ -464,6 +467,8 @@ export async function convertLsToSupplier(
       queue.set(p.sku, arr);
     }
 
+    let cumulative = 0;
+    let currentGroup = ""; // 当前 FBA 分组键（同一货件追踪编码连续编号，换单号重新从 1 起）
     for (const item of items) {
       const sku = item.sku;
       if (!sku) {
@@ -476,7 +481,13 @@ export async function convertLsToSupplier(
         skipped.push({ sku, reason: "SO-SKU 表中无对应 SO" });
         continue;
       }
-      const { fileName, buffer } = await buildLsInvoice(top, item, so, opts);
+      const gk = item.refId || item.boxId;
+      if (gk !== currentGroup) {
+        currentGroup = gk;
+        cumulative = 0; // 换 FBA 货件，箱号重新从 1 起
+      }
+      const { fileName, buffer } = await buildLsInvoice(top, item, so, opts, cumulative);
+      cumulative += item.boxCount;
       zip.file(fileName, buffer);
       files.push({ so, sku, fileName, warnings: [] });
     }
@@ -486,6 +497,8 @@ export async function convertLsToSupplier(
       `未在 SO-SKU 表中找到发票「${sourceFileName}」的映射，已按 SKU 全局匹配`
     );
     const usedSos = new Set<string>();
+    let cumulative = 0;
+    let currentGroup = ""; // 当前 FBA 分组键（同一货件追踪编码连续编号，换单号重新从 1 起）
     for (const item of items) {
       const sku = item.sku;
       if (!sku) {
@@ -503,7 +516,13 @@ export async function convertLsToSupplier(
         warnings.push(`SKU「${sku}」在 SO-SKU 表中对应多个 SO(${sos.join("/")})，已取 ${so}`);
       }
       usedSos.add(so);
-      const { fileName, buffer } = await buildLsInvoice(top, item, so, opts);
+      const gk = item.refId || item.boxId;
+      if (gk !== currentGroup) {
+        currentGroup = gk;
+        cumulative = 0; // 换 FBA 货件，箱号重新从 1 起
+      }
+      const { fileName, buffer } = await buildLsInvoice(top, item, so, opts, cumulative);
+      cumulative += item.boxCount;
       zip.file(fileName, buffer);
       files.push({ so, sku, fileName, warnings: [] });
     }
@@ -777,7 +796,7 @@ const YX_SUPPLIERS: Record<YxSupplierKey, YxSupplierSpec> = {
     channelSheet: { name: "2026.8.27 服务渠道表", col: 3 },
   },
 
-  // ── 美琦：与 LS 美线发票同构(18 列)，区别仅在 A 列用累计区间「起-止」 ──
+  // ── 美琦：与 LS 美线发票同构(18 列，A 列均为累计区间「起-止」) ──
   美琦: {
     key: "美琦",
     templateFile: "模板转换/美琦-美线模板.xlsx",

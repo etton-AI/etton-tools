@@ -1382,6 +1382,10 @@ interface PacificSplitResult {
     - **美琦 A 列「起-止」箱号须按 FBA 货件分组顺延**：原实现 `cumulative` 全局累加、跨 FBA 不重置，导致不同 FBA 的箱号连号（FBA-B 第一箱接着 FBA-A 编 `61-70`）。现改为 `YxSupplierSpec` 新增可选 `groupKey`，美琦 `groupKey = (it) => it.refId || it.boxId`（货件追踪编码），`convertYxToSupplier` 循环里 `currentGroup` 变化时 `cumulative` 归 0——同一个 FBA 货件内连续累加（`1-30`/`31-60`），换货件追踪编码重新从 1 起（`1-10`）。其余供应商不设 `groupKey`，行为不变。
     - **预计提货时间 E2 导出成一串数字**：模板 E2 无日期格式，旧 `todayExcelSerial()` 只写序列数字，Excel/WPS 显示为 `46312`。新增 `writePickupDate(cell)` 在写序列的同时设 `cell.numFmt = "yyyy-mm-dd"`（LS `buildLsInvoice` 与美琦 `fillHeader` 两处都改）。**坑**：不能改写成 `new Date(y,m,d)`（本地午夜）——ExcelJS 按 Date 的 UTC 分量序列化，UTC+8 会偏一天；保留数字序列 + numFmt 最稳。
     - 位置：`src/lib/ettong-to-supplier.ts`（`YxSupplierSpec.groupKey`、美琦 spec、`convertYxToSupplier` 循环、`writePickupDate`、`todayExcelSerial`）
+104. **朗胜(LS)转供应商：货箱编号 A 列改为按 FBA 分组顺延（与美琦一致）** (2026-10-17)
+    - LS 美线发票 A 列货箱编号原为 `${boxId}U000001-${boxCount}`（如 `FBA19S135JS8U000001-30`），每行独立、不跨行顺延。现改为累计「起-止」区间（`${start}-${end}`，`start=前序累计+1`），同一货件追踪编码(refId)内连续累加（`1-30`/`31-60`），换单号重新从 1 起（`1-10`）——与美琦模板 A 列格式一致。
+    - `buildLsInvoice` 新增入参 `boxRangeStart`；`convertLsToSupplier` 两处循环（按文件名分组 / 按 SKU 全局 fallback）各维护 `cumulative` + `currentGroup`（`item.refId || item.boxId`），写票后 `cumulative += item.boxCount`（仅成功生成发票的行累加，跳过行不占号）。
+    - 位置：`src/lib/ettong-to-supplier.ts`（`buildLsInvoice`、`convertLsToSupplier` 两个循环）
 
 ### 待重构项
 
