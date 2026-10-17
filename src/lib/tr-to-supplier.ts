@@ -276,6 +276,12 @@ interface SupplierSpec {
   imageCol: number;       // DISPIMG 图片列(0 = 不用 DISPIMG)
   rowHeight?: number;     // 数据行高(图片供应商需要)
   maxCol: number;         // 数据区最大列(用于边框)
+  /**
+   * 数据区结束行(含)。设置后表示数据区之后仍有需保留的内容(合计行/下拉数据区),
+   * 填充采用「覆盖式」: 不删除数据区行, 只覆盖前 N 行值, 保留其后内容与全部格式。
+   * 不设置则数据区延续到 sheet 末尾, 采用「重建式」(删除示例行 + 复制首行格式重写)。
+   */
+  dataEndRow?: number;
   fillHeader: (
     ws: ExcelJS.Worksheet,
     top: TrTopInfo,
@@ -465,6 +471,7 @@ const SUPPLIERS: Record<SupplierKey, SupplierSpec> = {
     imageCol: 23, // W 列 产品图片
     rowHeight: 35,
     maxCol: 24,
+    dataEndRow: 23, // 数据区 R12~R23(R24 起为合计行/渠道下拉区, 须保留), 覆盖式填充
     fillHeader(ws, top, opts, items) {
       const boxIds = items.map((i) => i.boxId).join(",");
       const refIds = items.map((i) => i.refId).join(",");
@@ -682,6 +689,42 @@ async function injectDispimg(
 }
 
 // ============================================================
+// 数据区覆盖式填充辅助(保留模板数据区全部格式: 字体/颜色/背景/边框/对齐/数字格式/行高)
+// ============================================================
+
+/**
+ * 从数据区起始行向下扫描, 返回最后一行「有值或有边框」的行号(1-based)。
+ * 用于确定模板数据区预留了多少格式行; 数据超出时在末尾复制首行格式扩行。
+ * 返回 dataStart-1 表示数据区为空(异常模板)。
+ */
+function findTemplateDataLastRow(
+  ws: ExcelJS.Worksheet,
+  dataStart: number,
+  maxCol: number
+): number {
+  let last = dataStart - 1;
+  for (let r = dataStart; r <= ws.rowCount; r++) {
+    const row = ws.getRow(r);
+    let hasFormat = false;
+    for (let c = 1; c <= maxCol; c++) {
+      const cell = row.getCell(c);
+      if (cell.value != null && String(cell.value).trim() !== "") {
+        hasFormat = true;
+        break;
+      }
+      const b = cell.border || {};
+      if (b.left?.style || b.right?.style || b.top?.style || b.bottom?.style) {
+        hasFormat = true;
+        break;
+      }
+    }
+    if (hasFormat) last = r;
+    else if (r > dataStart) break; // 数据区之后连续空行, 停止扫描
+  }
+  return last;
+}
+
+// ============================================================
 // 主入口
 // ============================================================
 
@@ -729,21 +772,50 @@ export async function convertTrToSupplier(
   // ── 3. 填充订单头 ──
   spec.fillHeader(outSheet, top, { customerOrderNo: orderNo, channelName }, items);
 
-  // ── 4. 填充数据区(先删除模板示例数据行) ──
+  // ── 4. 填充数据区(覆盖式: 保留模板数据区全部格式, 仅覆盖值) ──
   const dataStart = spec.headerStartRow;
-  const rowsToDelete = outSheet.actualRowCount - dataStart + 1;
-  if (rowsToDelete > 0) outSheet.spliceRows(dataStart, rowsToDelete);
+  const dataRowHeight = outSheet.getRow(dataStart).height ?? spec.rowHeight ?? 15;
+
+  // 模板数据区预留的格式行数
+  let templateDataRows: number;
+  if (spec.dataEndRow) {
+    // 航乐: 数据区固定行数, 之后有保留内容(合计行/下拉数据区), 超出报错
+    templateDataRows = spec.dataEndRow - dataStart + 1;
+    if (items.length > templateDataRows) {
+      throw new Error(
+        `「${spec.key}」数据行数(${items.length})超出模板预留行数(${templateDataRows})，请拆分发票`
+      );
+    }
+  } else {
+    // 凯鑫/英美/星链: 扫描模板数据区实际预留行数(示例行 + 空格式行)
+    const templateLast = findTemplateDataLastRow(outSheet, dataStart, spec.maxCol);
+    templateDataRows = templateLast >= dataStart ? templateLast - dataStart + 1 : 0;
+  }
+
+  // 清空模板数据区值(保留格式/行高)
+  const clearEnd = dataStart + templateDataRows - 1;
+  for (let r = dataStart; r <= clearEnd; r++) {
+    const row = outSheet.getRow(r);
+    for (let c = 1; c <= spec.maxCol; c++) row.getCell(c).value = null;
+  }
+
+  // 数据超出模板预留行 → 复制数据区首行格式扩行(保留边框/底色/字体/行高)
+  if (!spec.dataEndRow && items.length > templateDataRows) {
+    outSheet.duplicateRow(dataStart, items.length - templateDataRows, true);
+  }
 
   let cumulative = 0;
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
     const row = outSheet.getRow(dataStart + i);
-    if (spec.rowHeight) row.height = spec.rowHeight;
+    row.height = dataRowHeight;
 
     const values = spec.mapItem(item, top, cumulative);
-    values.forEach((v, ci) => {
-      if (v !== null && v !== undefined && v !== "") row.getCell(ci + 1).value = v;
-    });
+    for (let c = 1; c <= spec.maxCol; c++) {
+      const v = values[c - 1];
+      // 覆盖式: 模板单元格已有正确样式, 仅写值(空值跳过, 保留模板原样式)
+      if (v !== null && v !== undefined && v !== "") row.getCell(c).value = v;
+    }
 
     // DISPIMG 公式(图片列)
     if (spec.imageCol > 0 && item.image && imageIds[i]) {
@@ -751,15 +823,6 @@ export async function convertTrToSupplier(
       row.getCell(spec.imageCol).value = {
         formula: `_xlfn.DISPIMG("${id}",1)`,
         result: `=DISPIMG("${id}",1)`,
-      };
-    }
-
-    for (let c = 1; c <= spec.maxCol; c++) {
-      row.getCell(c).border = {
-        top: { style: "thin" },
-        left: { style: "thin" },
-        bottom: { style: "thin" },
-        right: { style: "thin" },
       };
     }
     cumulative += item.boxCount;

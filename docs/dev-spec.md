@@ -1361,6 +1361,14 @@ interface PacificSplitResult {
     - **已知限制**：行位移只处理单张 `drawing1.xml`；若源文件有多张 drawing 需扩展。
     - 位置：`src/lib/tr-to-supplier.ts`（`getSupplierChannels` / `buildEttonInvoice` / `resolveWorksheetTarget` / `shiftRowRefsInSheetXml` / `shiftRowsInDrawingXml`）、`src/app/api/tr-to-supplier/route.ts`、`src/app/api/tr-to-supplier/channels/route.ts`、`src/app/tr-to-supplier/page.tsx`
 
+101. **TR转供应商：航乐模板须从空白 `.xls` 用 LibreOffice 转 `.xlsx` 保格式，且数据区用「覆盖式」填充** (2026-10-17)
+    - **根因**：早期 `航乐-模板.xlsx` 由 `fix_hangyue_template.py` 从答案文件 `.xls` 转来，只复制了值+合并单元格+列宽，**丢弃了字体/颜色/背景/行高/边框**（模板里字体全变默认 Calibri 11、背景全无），导出与供应商模板完全不像。且原数据区填充用 `spliceRows(dataStart, 到末尾)` 删除示例行后写「裸行」，进一步丢格式、还误删了数据区之后的合计行(R24 `=SUM(K12:K23)` 等)与渠道下拉数据区(R59~R79 K 列 / AG 列)。
+    - **修复（两步）**：
+      1. 模板用 LibreOffice 从**空白模板** `public/templates/suppliers/模板转换/航乐欧州发票模板.xls` 转 `.xlsx`（`soffice --headless --convert-to xlsx`，加独立 `-env:UserInstallation`），字体(宋体/微软雅黑/Arial Black/Calibri)、颜色、背景填充(黄/白)、行高(R1=33/R3=35/R11=60/数据区30/R24=27)、列宽、25 个合并单元格、R24 SUM 公式、R59 渠道区全部 100% 保留。
+      2. 数据区填充统一改为「覆盖式」（四家一致）：不 spliceRows、直接清空模板数据区示例值后覆盖写入新值，完整保留模板格式(字体/颜色/背景/边框/对齐/数字格式/行高)。`SupplierSpec` 新增 `dataEndRow`（航乐=23，数据区固定 12 行、超出报错「请拆分发票」，其后 R24 合计行 SUM 公式与 R59 渠道下拉区须保留）；凯鑫/英美/星链不设 `dataEndRow`，用 `findTemplateDataLastRow()` 扫描模板数据区实际预留的格式行数(示例行 + 空格式行)，数据超出时 `duplicateRow(dataStart, 超出数, true)` 复制首行格式扩行。数据行行高统一取模板首行 `height ?? spec.rowHeight ?? 15`。
+    - **坑**：覆盖式下模板单元格已自带正确样式，**只写值、不覆盖样式**（空值跳过），否则会用错误快照覆盖模板列级样式；数据超出模板预留行时靠 `duplicateRow` 扩行，星链的空格式行(R20~R23 带边框白底)因此完整保留（重建式 `spliceRows` 会破坏它）。另：ExcelJS 对「无单元格、纯列级样式」的列（英美 R~Z 列，字体靠 `<col style>` 兜底）读不到、openpyxl 也会误报其字体——判断以解包 XML 的 `<cols>`/`<xf>` 为准。
+    - 位置：`src/lib/tr-to-supplier.ts`（`SupplierSpec.dataEndRow` / `findTemplateDataLastRow`）、`public/templates/tr-suppliers/航乐-模板.xlsx`
+
 102. **延讯(YX)转供应商：批量上传 + 多供应商（天图/星链/皓鹏/美琦）+ 渠道下拉解析** (2026-10-17)
     - **多供应商配置化**：`src/lib/ettong-to-supplier.ts` 从单一 `convertYxToTiantu()` 改为 `YxSupplierSpec` 配置表（`YX_SUPPLIERS`，key = 天图/星链/皓鹏/美琦/安邦），`convertYxToSupplier(filePath, name, supplier, opts)` 按供应商分派 `fillHeader`/`mapItem`；`opts = { customerOrderNo, channelName }`。安邦无模板 `ready:false` 占位。
     - **皓鹏模板 `.xls` → `.xlsx`**：ExcelJS 只支持 `.xlsx`，需用 Python（xlrd+openpyxl）一次性把 `模板转换/皓鹏-模板.xls` 转成 `皓鹏-模板.xlsx`。转换保留值/示例行/sheet 名，但**边框/列宽等格式丢失**——数据行填充时统一补边框（复用天图做法）。**坑**：皓鹏收件人字段（B3/B4/B5…）在模板里是硬编码示例值（非公式），转换后未替换，需人工核对。
