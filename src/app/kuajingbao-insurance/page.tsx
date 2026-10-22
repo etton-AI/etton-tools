@@ -8,14 +8,34 @@ import { useState, useCallback, useRef } from "react";
 
 interface GroupItem {
   so: string;
+  orderNo: string;
   country: string;
   warehouseCode: string;
   goodsDescription: string;
+  goodsCategory: string;
+  isFragile: boolean;
   currency: string;
+  currencyCode: string;
   totalValue: number;
   totalBoxes: number;
   totalWeight: number;
   remark: string;
+}
+
+interface CurrencyWarning {
+  so: string;
+  country: string;
+  declared: string;
+  expected: string;
+}
+
+interface NonFbaWarning {
+  so: string;
+  fbaCodes: string[];
+}
+
+interface SplitInfo {
+  so: string;
 }
 
 interface ConvertResponse {
@@ -24,6 +44,9 @@ interface ConvertResponse {
   outputName: string;
   totalGroups: number;
   lockWarehouseCount: number;
+  currencyWarnings: CurrencyWarning[];
+  nonFbaWarnings: NonFbaWarning[];
+  splitInfos: SplitInfo[];
   groups: GroupItem[];
   downloadUrl: string;
   error?: string;
@@ -35,7 +58,6 @@ interface ConvertResponse {
 
 const TRANSPORT_OPTIONS = ["海运", "空运", "铁路", "公路", "全程快递", "多式联运"];
 const DELIVERY_OPTIONS = ["卡车派", "快递派", "待定"];
-const GOODS_CATEGORY_OPTIONS = ["无易碎品", "是易碎品"];
 const PACKAGE_OPTIONS = ["纸箱", "木箱", "木箱+纸箱", "托盘", "航空箱", "集装箱"];
 
 // ============================================================
@@ -55,7 +77,6 @@ export default function KuajingbaoInsurancePage() {
   const [transportMode, setTransportMode] = useState("海运");
   const [deliveryMethod, setDeliveryMethod] = useState("卡车派");
   const [originPlace, setOriginPlace] = useState("深圳");
-  const [goodsCategory, setGoodsCategory] = useState("无易碎品");
   const [packageType, setPackageType] = useState("纸箱");
 
   const isSupported = (name: string) => /\.(xlsx|xls)$/i.test(name);
@@ -74,7 +95,6 @@ export default function KuajingbaoInsurancePage() {
         formData.append("transportMode", transportMode);
         formData.append("deliveryMethod", deliveryMethod);
         formData.append("originPlace", originPlace);
-        formData.append("goodsCategory", goodsCategory);
         formData.append("packageType", packageType);
 
         const res = await fetch("/api/kuajingbao-insurance", {
@@ -94,7 +114,7 @@ export default function KuajingbaoInsurancePage() {
         setProcessing(false);
       }
     },
-    [shipDate, transportMode, deliveryMethod, originPlace, goodsCategory, packageType]
+    [shipDate, transportMode, deliveryMethod, originPlace, packageType]
   );
 
   const handleFile = useCallback(
@@ -195,14 +215,6 @@ export default function KuajingbaoInsurancePage() {
               <input value={originPlace} onChange={(e) => setOriginPlace(e.target.value)} className={inputCls} />
             </label>
             <label className="flex flex-col gap-1">
-              <span className="text-xs text-zinc-500">货物类别</span>
-              <select value={goodsCategory} onChange={(e) => setGoodsCategory(e.target.value)} className={inputCls}>
-                {GOODS_CATEGORY_OPTIONS.map((o) => (
-                  <option key={o} value={o}>{o}</option>
-                ))}
-              </select>
-            </label>
-            <label className="flex flex-col gap-1">
               <span className="text-xs text-zinc-500">包装类型</span>
               <select value={packageType} onChange={(e) => setPackageType(e.target.value)} className={inputCls}>
                 {PACKAGE_OPTIONS.map((o) => (
@@ -271,14 +283,83 @@ export default function KuajingbaoInsurancePage() {
       {/* Results */}
       {result && (
         <>
+          {/* 审核结果 */}
+          {(result.currencyWarnings.length > 0 ||
+            result.nonFbaWarnings.length > 0 ||
+            result.splitInfos.length > 0) && (
+            <div className="space-y-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                审核结果（请人工核对确认，以下告警不阻断下载）
+              </p>
+
+              {result.splitInfos.length > 0 && (
+                <div className="rounded-lg border border-sky-300 bg-sky-50 p-4">
+                  <p className="text-sm font-semibold text-sky-800">
+                    🔀 易碎品拆分（{result.splitInfos.length} 票）
+                  </p>
+                  <ul className="mt-2 space-y-1 text-sm text-sky-800">
+                    {result.splitInfos.map((s) => (
+                      <li key={s.so}>
+                        <span className="font-mono text-xs">{s.so}</span>
+                        ：同时含易碎品与非易碎品，已拆分为「{s.so}-1」（易碎品）「{s.so}-2」（非易碎品）两票
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {result.currencyWarnings.length > 0 && (
+                <div className="rounded-lg border border-amber-300 bg-amber-50 p-4">
+                  <p className="text-sm font-semibold text-amber-800">
+                    ⚠️ 币种异常（{result.currencyWarnings.length} 票，请确认是否客户填错币种）
+                  </p>
+                  <ul className="mt-2 space-y-1 text-sm text-amber-800">
+                    {result.currencyWarnings.map((w) => (
+                      <li key={w.so}>
+                        <span className="font-mono text-xs">{w.so}</span>
+                        （{w.country}）：清单申报币种为 <span className="font-semibold">{w.declared}</span>，
+                        该国正常应为 <span className="font-semibold">{w.expected}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {result.nonFbaWarnings.length > 0 && (
+                <div className="rounded-lg border border-red-300 bg-red-50 p-4">
+                  <p className="text-sm font-semibold text-red-700">
+                    🚫 疑似非 FBA 仓（{result.nonFbaWarnings.length} 票，请确认是否按 FBA 投保）
+                  </p>
+                  <ul className="mt-2 space-y-1 text-sm text-red-700">
+                    {result.nonFbaWarnings.map((w) => (
+                      <li key={w.so}>
+                        <span className="font-mono text-xs">{w.so}</span>
+                        ：入仓编号 <span className="font-mono text-xs">{w.fbaCodes.join(" ")}</span> 不含「FBA」字眼，
+                        疑似卫星仓 / 沃尔玛仓等非 FBA 仓
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Summary + actions */}
           <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-zinc-200 bg-white p-4 shadow-sm">
             <div>
               <p className="text-sm text-zinc-600">
                 生成完成：<span className="font-semibold text-emerald-700">{result.totalGroups} 票</span>
+                {result.splitInfos.length > 0 && (
+                  <span className="font-semibold text-sky-700"> · 易碎拆分 {result.splitInfos.length} 票</span>
+                )}
                 {result.lockWarehouseCount > 0 && (
                   <span className="font-semibold text-emerald-700"> · 全美锁仓（带备注）{result.lockWarehouseCount} 票</span>
                 )}
+                {result.currencyWarnings.length === 0 &&
+                  result.nonFbaWarnings.length === 0 &&
+                  result.splitInfos.length === 0 && (
+                    <span className="font-semibold text-emerald-700"> · 审核通过，未发现异常</span>
+                  )}
               </p>
               <p className="mt-0.5 text-xs text-zinc-400">
                 {result.sourceFile} → {result.outputName}
@@ -312,7 +393,8 @@ export default function KuajingbaoInsurancePage() {
               <table className="w-full text-left text-sm">
                 <thead>
                   <tr className="border-b border-zinc-100 text-xs text-zinc-400">
-                    <th className="px-4 py-2 font-medium">SO 号</th>
+                    <th className="px-4 py-2 font-medium">原单号</th>
+                    <th className="px-4 py-2 font-medium">货物类别</th>
                     <th className="px-4 py-2 font-medium">仓库</th>
                     <th className="px-4 py-2 font-medium">货物描述</th>
                     <th className="px-4 py-2 font-medium">币种</th>
@@ -324,8 +406,15 @@ export default function KuajingbaoInsurancePage() {
                 </thead>
                 <tbody className="divide-y divide-zinc-50">
                   {result.groups.map((g) => (
-                    <tr key={g.so} className="text-zinc-700">
-                      <td className="whitespace-nowrap px-4 py-2 font-mono text-xs">{g.so}</td>
+                    <tr key={g.orderNo} className="text-zinc-700">
+                      <td className="whitespace-nowrap px-4 py-2 font-mono text-xs">{g.orderNo}</td>
+                      <td className="whitespace-nowrap px-4 py-2">
+                        {g.isFragile ? (
+                          <span className="rounded bg-orange-100 px-1.5 py-0.5 text-xs font-medium text-orange-700">是易碎品</span>
+                        ) : (
+                          <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs font-medium text-zinc-500">无易碎品</span>
+                        )}
+                      </td>
                       <td className="whitespace-nowrap px-4 py-2 font-mono text-xs">{g.warehouseCode}</td>
                       <td className="px-4 py-2">{g.goodsDescription}</td>
                       <td className="whitespace-nowrap px-4 py-2">{g.currency}</td>
@@ -352,9 +441,9 @@ export default function KuajingbaoInsurancePage() {
       {!result && (
         <div className="rounded-lg border border-zinc-200 bg-white p-4 text-sm text-zinc-500">
           <p>
-            💡 自动完成：货物描述（品名+数量PCS，多品名以「、」连接）、货值（总申报货值求和）、
-            币种（申报币种转中文）、备注（仅「全美锁仓」渠道，客户渠道含「全美」时按仓库代码生成 AGL 备注）。
-            其余字段（被保险人、运输方式、目的地类型等）按模板示例自动填充常量。
+            💡 自动完成：货物描述（品名+数量PCS）、货值（总申报货值求和）、币种（申报币种转中文）、
+            货物类别（按材质自动判定易碎/非易碎）、备注（「全美锁仓」渠道按仓库代码生成 AGL 备注）。
+            审核：按材质拆分易碎/非易碎、按目的国校验币种、按 FBA ID 识别疑似非 FBA 仓。
           </p>
         </div>
       )}

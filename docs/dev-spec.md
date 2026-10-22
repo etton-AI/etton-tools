@@ -1387,6 +1387,18 @@ interface PacificSplitResult {
     - `buildLsInvoice` 新增入参 `boxRangeStart`；`convertLsToSupplier` 两处循环（按文件名分组 / 按 SKU 全局 fallback）各维护 `cumulative` + `currentGroup`（`item.refId || item.boxId`），写票后 `cumulative += item.boxCount`（仅成功生成发票的行累加，跳过行不占号）。
     - 位置：`src/lib/ettong-to-supplier.ts`（`buildLsInvoice`、`convertLsToSupplier` 两个循环）
 
+105. **跨境堡批量投保：新增审核功能（易碎品按材质拆分 / 币种校验 / FBA 仓校验）** (2026-10-22)
+    - 需求：① 按「材质」区分易碎（玻璃/陶瓷/大理石/水晶/亚克力及其制品），一票内同时含易碎与非易碎时拆两票投保；② 按目的国识别币种是否填错（德国→EUR 但申报 USD 需提示）；③ 按 FBA ID 识别是否 FBA 仓（卫星仓/沃尔玛仓的入仓编号不含「FBA」字眼，批量全选易误投为 FBA）。
+    - **货箱清单原就有「材质」「单箱货物毛重」「单箱货物净重」列**，旧代码未解析。`CargoColumnMap` 新增 `material`（必填，缺失报错）+ `boxGrossWeight`/`boxNetWeight`（可选）。
+    - **易碎判定** = 关键词子串匹配（大小写不敏感）：`玻璃/陶瓷/大理石/水晶/亚克力/glass/ceramic/marble/crystal/acrylic`。按「行」判定：每行材质决定该行是否易碎；一 SO 内 fragile 行与非 fragile 行并存 → 拆成 `{SO}-1`（易碎，货物类别「是易碎品」）与 `{SO}-2`（非易碎，「无易碎品」）两票，易碎始终 `-1`（与源行序无关）。原单号（模板第 4 列「必须唯一」）带后缀保证唯一，运输工具/提单号仍用原始 SO。
+    - **货物类别不再由用户选**：移除全局下拉，按材质自动判定（模板说明里「无易碎品=无玻璃/陶瓷制品、是易碎品=全是玻璃/陶瓷制品」是模板自带的旧定义，本次按用户要求把易碎范围扩到玻璃/陶瓷/大理石/水晶/亚克力）。
+    - **总公斤数改为按行累加**（`单箱毛重 × 总箱数`，毛重缺失用净重兜底），不再用合并单元格「货箱重量」总值——因拆分需要每行重量。⚠️ 按行累加与合并总值可能因四舍五入有微小差异（如 22.9 vs 23.0），以按行结果为准；`boxWeight`（货箱重量）仍保留为「无按行重量时」的兜底。
+    - **FBA ID 是逐行属性**：`CargoRow.fbaId` 存每行 FBA 号（去 `U\d{6}` 后缀），拆分子票的入仓编号只取该侧各行 FBA 去重（`buildGroup` 内 `fbaList`），不再取整票 `acc.fbaList`；`acc.fbaList`（SO 级）仅保留给 FBA 仓校验用。实测 `TRKJ26100067` 两行 FBA `FBA19SYL19TT`/`FBA19SXYR0NW` 分别落到 `-1`/`-2` 子票。
+    - **币种校验**：`COUNTRY_CURRENCY`（目的国中文名 → 预期代码）只覆盖常见国家（欧元区 + 主要币种），欧盟内非欧元区（波兰 PLN/捷克 CZK/匈牙利 HUF/罗马尼亚 RON/瑞典 SEK/丹麦 DKK）单独列；不在表内不校验；申报币种为空不校验。
+    - **FBA 仓校验**：入仓编号去箱序后缀后 `toUpperCase().includes("FBA")` 判 FBA，否则告警（`STAR-...` 卫星仓即此列——已知坑 #92 曾记录该列混入 `STAR-SBCVDCB3G5W5E`，本次将其从「源数据异常透传」升级为「主动告警」）。
+    - **交互**：三类告警在结果页醒目展示、**不阻断下载**（人工核对后自行处理），并在 summary 显示计数；无任何告警时显示「审核通过」。
+    - 位置：`src/lib/kuajingbao-insurance.ts`（`FRAGILE_MATERIAL_KEYWORDS`/`COUNTRY_CURRENCY`/`isFragileMaterial`/`isFbaCode`/`SoGroup.goodsCategory`/`orderNo`/`currencyCode`、`parseCargoList` 重构为 `SoAccumulator`+`buildGroup`+`finalizeGroup`）、`src/app/api/kuajingbao-insurance/route.ts`（响应新增 `currencyWarnings`/`nonFbaWarnings`/`splitInfos`）、`src/app/kuajingbao-insurance/page.tsx`（移除货物类别下拉 + 三块审核面板）
+
 ### 待重构项
 
 - [ ] 将 session 存储从内存 Map 改为临时文件或 Redis

@@ -41,7 +41,6 @@ function parseConfig(formData: FormData): KuajingbaoConfig {
     transportMode: str("transportMode") || "海运",
     deliveryMethod: str("deliveryMethod") || "卡车派",
     originPlace: str("originPlace") || "深圳",
-    goodsCategory: str("goodsCategory") || "无易碎品",
     packageType: str("packageType") || "纸箱",
   };
 }
@@ -91,12 +90,19 @@ export async function POST(request: NextRequest) {
       outputName,
       totalGroups: result.groups.length,
       lockWarehouseCount: result.lockWarehouseCount,
+      currencyWarnings: result.currencyWarnings,
+      nonFbaWarnings: result.nonFbaWarnings,
+      splitInfos: result.splitInfos,
       groups: result.groups.map((g) => ({
         so: g.so,
+        orderNo: g.orderNo,
         country: g.country,
         warehouseCode: g.warehouseCode,
         goodsDescription: g.goodsDescription,
+        goodsCategory: g.goodsCategory,
+        isFragile: g.isFragile,
         currency: g.currency,
+        currencyCode: g.currencyCode,
         totalValue: g.totalValue,
         totalBoxes: g.totalBoxes,
         totalWeight: g.totalWeight,
