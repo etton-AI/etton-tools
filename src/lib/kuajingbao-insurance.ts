@@ -47,8 +47,8 @@ export interface KuajingbaoConfig {
 
 /** 一票（一个 SO，或拆分后的易碎/非易碎子票）的聚合结果 */
 export interface SoGroup {
-  so: string;              // 原始系统SO → 运输工具名称及航次 / 提单号
-  orderNo: string;         // 原单号（拆分子票带 -易碎品/-非易碎品 后缀，保证唯一）
+  so: string;              // 原始系统SO（用于告警/拆分标识，不直接写入运单）
+  orderNo: string;         // 原单号（拆分子票带 -1/-2 后缀，保证唯一；同时填运输工具名称及航次 / 提单号）
   workOrder: string;       // 工作号（仅用于展示/排查）
   country: string;         // 国家 → 目的国
   warehouseCode: string;   // 仓库代码 → 目的地
@@ -667,10 +667,10 @@ function fillTemplate(
       INSURED,                 // 1 被保险人
       TYPE,                    // 2 类型
       null,                    // 3 证件号
-      g.orderNo,               // 4 原单号（拆分票带 -易碎品/-非易碎品 后缀，保证唯一）
+      g.orderNo,               // 4 原单号（拆分票带 -1/-2 后缀，保证唯一）
       config.transportMode,    // 5 干线运输方式
-      g.so,                    // 6 运输工具名称及航次
-      g.so,                    // 7 提单号
+      g.orderNo,               // 6 运输工具名称及航次（与原单号一致）
+      g.orderNo,               // 7 提单号（与原单号一致）
       config.deliveryMethod,   // 8 派送方式
       DEST_TYPE,               // 9 目的地类型
       null,                    // 10 快递公司
