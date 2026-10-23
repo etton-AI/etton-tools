@@ -173,9 +173,9 @@ const TOOLS: Tool[] = [
   },
   {
     href: "/yx-to-tiantu",
-    title: "延讯转天图发票",
+    title: "延讯转供应商发票",
     badge: "高效",
-    desc: "延讯易通标准模板转天图供应商发票",
+    desc: "延讯易通标准模板转供应商发票，支持天图/星链/皓鹏/美琦",
     icon: (
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
         <rect x="3" y="4" width="18" height="16" rx="2" />
