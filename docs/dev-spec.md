@@ -686,6 +686,7 @@ interface PacificSplitResult {
 - 报关方式：有单证 → 报关退税（凯鑫/英美/航乐）/ 合并报关（星链）；无单证 → 买单报关
 - 交税/是否包税：清关方式「自税」→ 凯鑫「自税递延」/ 航乐「不包税递延」
 - 收件地址为模板内 VLOOKUP 公式（凯鑫/英美）或 INDIRECT 选表（星链），写仓库代码自动带出
+- 英美双模板：按源「收件人国家」自动切换——美线（US/USA）用「英美-美国模板.xlsx」（无 EORI，R20 即币种，数据区 24 列），其余用「英美-模板.xlsx」（R20 EORI、R21 币种，数据区 26 列），渠道下拉合并两模板（约 309 条），见已知坑 #106
 - 航乐：SHIPMENT ID / AMAZON REFERENCE ID = 逗号连接货箱编号 / refId；ZIP/CITY 取源 F10/F11（仓库地址/邮编）；材重 = 长×宽×高 ÷ 6000、CBM = 长×宽×高 ÷ 1e6、净重(单个) = 净重 ÷ 单箱数量；物品属性按关键词粗分类（灯类/玩具类/服装类）
 
 #### API
@@ -1398,6 +1399,14 @@ interface PacificSplitResult {
     - **FBA 仓校验**：入仓编号去箱序后缀后 `toUpperCase().includes("FBA")` 判 FBA，否则告警（`STAR-...` 卫星仓即此列——已知坑 #92 曾记录该列混入 `STAR-SBCVDCB3G5W5E`，本次将其从「源数据异常透传」升级为「主动告警」）。
     - **交互**：三类告警在结果页醒目展示、**不阻断下载**（人工核对后自行处理），并在 summary 显示计数；无任何告警时显示「审核通过」。
     - 位置：`src/lib/kuajingbao-insurance.ts`（`FRAGILE_MATERIAL_KEYWORDS`/`COUNTRY_CURRENCY`/`isFragileMaterial`/`isFbaCode`/`SoGroup.goodsCategory`/`orderNo`/`currencyCode`、`parseCargoList` 重构为 `SoAccumulator`+`buildGroup`+`finalizeGroup`）、`src/app/api/kuajingbao-insurance/route.ts`（响应新增 `currencyWarnings`/`nonFbaWarnings`/`splitInfos`）、`src/app/kuajingbao-insurance/page.tsx`（移除货物类别下拉 + 三块审核面板）
+106. **TR转供应商：英美新增美线模板，按目的地国家自动切换** (2026-10-23)
+    - 背景：英美原模板「英美-模板.xlsx」是加拿大&英欧模板（渠道列表 B 列「欧洲海运/欧洲铁路」、地址库 GB/EU），美线（美国空海运）渠道获取不到。
+    - **双模板**：新增 `英美-美国模板.xlsx`（美线，渠道列表 A 列 R1 起无表头、地址库 sheet 名「亚马逊地址库」、数据区 24 列 A–X 无 Y 尺寸/Z 产地、无 EORI 字段）。
+    - **按国切换**：`SupplierSpec` 新增可选 `countryVariants`（`match(country)` 命中即覆盖 `templateFile`/`maxCol`/`fillHeader`，其余沿用）。英美变体 `match` 匹配 `US`/`USA`（源 F8 收件人国家，`cellText` 已 trim），命中→美线模板，否则→默认加拿大/英欧模板。在 `convertTrToSupplier` 里**先解析 `top` 再解析变体**（原来 `spec` 在函数开头就定死）。
+    - **fillHeader 差异**：加拿大/英欧 `B20=EORI、B21=币种`；美线**无 EORI**，`B20=币种`、`B21 所在货站留模板默认「广州站点」`。两者 B19=VAT、B24=箱数、B15/B16/B17 相同。
+    - **渠道下拉合并**：`ChannelSheetSpec` 新增可选 `templateFile`，`getSupplierChannels` 改为按模板文件分组读取（英美读两个文件：加拿大/英欧 B 列 + 美线 A 列；星链/航乐仍单文件多 sheet）。英美渠道下拉现约 309 条。
+    - 位置：`src/lib/tr-to-supplier.ts`（`SupplierSpec.countryVariants`、英美 `countryVariants`、`ChannelSheetSpec.templateFile`、`CHANNEL_SHEETS.英美`、`getSupplierChannels` 分组读取、`convertTrToSupplier` 变体解析）、`public/templates/tr-suppliers/英美-美国模板.xlsx`（新增）
+    - 已知限制：美线「所在货站」不按渠道自动选站点（模板内另有「渠道组/站点池」映射表，未接入自动选择，留模板默认「广州站点」）。
 
 ### 待重构项
 

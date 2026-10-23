@@ -289,6 +289,17 @@ interface SupplierSpec {
     items: TrItem[]
   ) => void;
   mapItem: (item: TrItem, top: TrTopInfo, cumulativeStart: number) => CellValue[];
+  /**
+   * 按目的地国家切换模板的变体(仅英美等多模板供应商使用)。
+   * 命中第一个 match 即用该变体(覆盖 templateFile/maxCol/fillHeader),
+   * 其余字段(sheetName/headerStartRow/imageCol/mapItem)沿用默认。
+   */
+  countryVariants?: {
+    match: (country: string) => boolean;
+    templateFile: string;
+    maxCol?: number;
+    fillHeader?: SupplierSpec["fillHeader"];
+  }[];
 }
 
 function customsFor(supplier: SupplierKey, customs: string): string {
@@ -410,6 +421,29 @@ const SUPPLIERS: Record<SupplierKey, SupplierSpec> = {
         item.asin,                              // U 产品ASIN
       ];
     },
+    // 美线(美国空海运)模板: 无 EORI, R20 为申报币种, 数据区 24 列(无 Y/Z 尺寸/产地)
+    countryVariants: [
+      {
+        match: (c) => /^(US|USA)$/i.test((c || "").trim()),
+        templateFile: "英美-美国模板.xlsx",
+        maxCol: 24,
+        fillHeader(ws, top, opts) {
+          const b = (r: number, v: string | number) => {
+            if (v !== "" && v !== null && v !== undefined) ws.getCell(r, 2).value = v;
+          };
+          b(1, opts.channelName);                 // 服务
+          b(2, top.warehouseCode);                // 地址库编码(触发 VLOOKUP 到 亚马逊地址库)
+          ws.getCell(14, 2).value = opts.customerOrderNo || null; // 客户订单号
+          b(15, top.hasBattery);                  // 带电
+          b(16, top.hasMagnet);                   // 带磁
+          b(17, customsFor("英美", top.customs)); // 报关方式
+          b(19, top.vatNo);                       // VAT号
+          b(20, top.currency);                    // 申报币种(美线无 EORI, R20 即币种)
+          b(24, top.totalBoxes);                  // 箱数
+          // R21 所在货站: 留模板默认「广州站点」(同加拿大/英欧模板不覆盖货站的做法)
+        },
+      },
+    ],
   },
 
   // ── 星链 ──────────────────────────────────────────────
@@ -536,11 +570,16 @@ interface ChannelSheetSpec {
   sheet: string;
   col: number;      // 1-based 列号
   startRow: number; // 数据起始行(1-based)
+  templateFile?: string; // 默认用 spec.templateFile; 多模板供应商(英美)可指定另一模板
 }
 
 const CHANNEL_SHEETS: Record<SupplierKey, ChannelSheetSpec[]> = {
   凯鑫: [{ sheet: "服务名称", col: 2, startRow: 2 }],
-  英美: [{ sheet: "渠道列表", col: 2, startRow: 2 }],
+  // 英美双模板: 加拿大/英欧(默认, 渠道列表 B 列 R2 起) + 美线(美国模板, 渠道列表 A 列 R1 起无表头)
+  英美: [
+    { sheet: "渠道列表", col: 2, startRow: 2 },
+    { templateFile: "英美-美国模板.xlsx", sheet: "渠道列表", col: 1, startRow: 1 },
+  ],
   星链: [
     { sheet: "US忽略", col: 1, startRow: 2 },
     { sheet: "AU忽略", col: 1, startRow: 2 },
@@ -562,22 +601,33 @@ export async function getSupplierChannels(supplier: SupplierKey): Promise<string
   const sheets = CHANNEL_SHEETS[supplier];
   if (!spec || !sheets) throw new Error(`未知供应商: ${supplier}`);
 
-  const tplPath = path.join(process.cwd(), "public", "templates", "tr-suppliers", spec.templateFile);
-  if (!fs.existsSync(tplPath)) throw new Error(`供应商模板不存在: ${tplPath}`);
-
-  const wb = new ExcelJS.Workbook();
-  await wb.xlsx.readFile(tplPath);
-
   const seen = new Set<string>();
   const channels: string[] = [];
+
+  // 按模板文件分组读取(多模板供应商如英美读多个文件; 单模板多 sheet 如星链/航乐只读一次)
+  const byFile = new Map<string, ChannelSheetSpec[]>();
   for (const cs of sheets) {
-    const ws = wb.getWorksheet(cs.sheet);
-    if (!ws) continue;
-    for (let r = cs.startRow; r <= ws.rowCount; r++) {
-      const name = cellText(ws.getCell(r, cs.col));
-      if (name && !seen.has(name)) {
-        seen.add(name);
-        channels.push(name);
+    const file = cs.templateFile ?? spec.templateFile;
+    if (!byFile.has(file)) byFile.set(file, []);
+    byFile.get(file)!.push(cs);
+  }
+
+  for (const [file, css] of byFile) {
+    const tplPath = path.join(process.cwd(), "public", "templates", "tr-suppliers", file);
+    if (!fs.existsSync(tplPath)) throw new Error(`供应商模板不存在: ${tplPath}`);
+
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.readFile(tplPath);
+
+    for (const cs of css) {
+      const ws = wb.getWorksheet(cs.sheet);
+      if (!ws) continue;
+      for (let r = cs.startRow; r <= ws.rowCount; r++) {
+        const name = cellText(ws.getCell(r, cs.col));
+        if (name && !seen.has(name)) {
+          seen.add(name);
+          channels.push(name);
+        }
       }
     }
   }
@@ -735,8 +785,8 @@ export async function convertTrToSupplier(
   customerOrderNo: string,
   channelName: string
 ): Promise<TrConvertResult> {
-  const spec = SUPPLIERS[supplier];
-  if (!spec) throw new Error(`未知供应商: ${supplier}`);
+  const baseSpec = SUPPLIERS[supplier];
+  if (!baseSpec) throw new Error(`未知供应商: ${supplier}`);
 
   const orderNo = (customerOrderNo || "").trim();
 
@@ -750,6 +800,17 @@ export async function convertTrToSupplier(
   const items = parseItems(srcSheet);
   if (items.length === 0) throw new Error("TR 发票中未找到有效箱单数据");
   top.currency = items[0]?.currency || "";
+
+  // 按目的地国家切换模板变体(如英美: 美线→美国模板, 加拿大/英欧→默认模板)
+  const variant = baseSpec.countryVariants?.find((v) => v.match(top.country));
+  const spec: SupplierSpec = variant
+    ? {
+        ...baseSpec,
+        templateFile: variant.templateFile,
+        maxCol: variant.maxCol ?? baseSpec.maxCol,
+        fillHeader: variant.fillHeader ?? baseSpec.fillHeader,
+      }
+    : baseSpec;
 
   // 提取源图片(仅 DISPIMG 供应商需要) + 预生成图片 ID
   const imageIds: (string | null)[] = items.map(() => null);
