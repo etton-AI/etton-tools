@@ -1408,6 +1408,15 @@ interface PacificSplitResult {
     - 位置：`src/lib/tr-to-supplier.ts`（`SupplierSpec.countryVariants`、英美 `countryVariants`、`ChannelSheetSpec.templateFile`、`CHANNEL_SHEETS.英美`、`getSupplierChannels` 分组读取、`convertTrToSupplier` 变体解析）、`public/templates/tr-suppliers/英美-美国模板.xlsx`（新增）
     - 已知限制：美线「所在货站」不按渠道自动选站点（模板内另有「渠道组/站点池」映射表，未接入自动选择，留模板默认「广州站点」）。
 
+107. **TR转供应商：页面拆两个入口 + 报关方式/送货货站可覆盖** (2026-10-23)
+    - 背景：原 `/tr-to-supplier` 单入口，一次转换同时生成「供应商发票 + 易通系统上传发票」；用户需要把易通上传独立成单独入口，且转供应商时每份发票可单独填 SO、报关方式/货站可改。
+    - **两个入口**：页面 tab 切换——入口1「易通系统上传」仅 `buildEttonInvoice`（第 8 行插入空行）；入口2「转供应商发票」仅 `convertTrToSupplier`。API POST 加 `mode` 参数（`ettong`/`supplier`）分支处理，入口2 不再同时生成易通上传。
+    - **每文件独立 SO**：`customerOrderNo` 由单一值改为 `formData.getAll("customerOrderNo")`（与 file 顺序对齐，可留空按源文件名命名）；前端文件列表每份一个 SO 输入框。
+    - **报关方式覆盖**：`fillHeader` 的 opts 新增 `customsOverride`，写入处由 `customsFor(supplier, top.customs)` 改为 `opts.customsOverride || customsFor(...)`。下拉值域按各供应商模板 data validation 硬编码（凯鑫 `报关退税/买单报关`、英美 `买单报关/报关退税/合并报关`、星链 `不需报关/单独报关/合并报关…`、航乐 `委托报关/报关退税`）——注意航乐/星链的合法值并非「买单报关」（`customsFor` 自动映射对无单证统一返回「买单报关」，落在这两家下拉值域之外，属既有逻辑）。
+    - **送货货站覆盖**：opts 新增 `station`，英美加/英欧 B22、英美美线 B21 所在货站、航乐 K5 交货仓库均可覆盖（默认留模板值 / 广州白云仓）。货站列表 `getSupplierStations`：英美读模板「站点」sheet（20 站点）、航乐硬编码 5 交货仓库（广州白云仓/深圳平湖仓/深圳福永仓/浙江义乌仓/中山航乐仓）、凯鑫/星链无货站字段返回空。
+    - **新增端点** `GET /api/tr-to-supplier/options?supplier=` 返回 `{ customs[], stations[] }` 供前端下拉。
+    - 位置：`src/lib/tr-to-supplier.ts`（`CUSTOMS_OPTIONS`/`HANGYUE_STATIONS`/`getSupplierCustomsOptions`/`getSupplierStations`、fillHeader opts 扩展、`convertTrToSupplier` 加参）、`src/app/api/tr-to-supplier/route.ts`（mode 分支）、`src/app/api/tr-to-supplier/options/route.ts`（新增）、`src/app/tr-to-supplier/page.tsx`（`EttongEntry`/`SupplierEntry` 两入口）
+
 ### 待重构项
 
 - [ ] 将 session 存储从内存 Map 改为临时文件或 Redis

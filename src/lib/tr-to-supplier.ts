@@ -285,7 +285,12 @@ interface SupplierSpec {
   fillHeader: (
     ws: ExcelJS.Worksheet,
     top: TrTopInfo,
-    opts: { customerOrderNo: string; channelName: string },
+    opts: {
+      customerOrderNo: string;
+      channelName: string;
+      customsOverride?: string; // 用户手动指定的报关方式(覆盖自动映射)
+      station?: string;         // 用户手动指定的送货货站/交货仓库(覆盖模板默认)
+    },
     items: TrItem[]
   ) => void;
   mapItem: (item: TrItem, top: TrTopInfo, cumulativeStart: number) => CellValue[];
@@ -308,6 +313,18 @@ function customsFor(supplier: SupplierKey, customs: string): string {
   }
   if (customs === "无单证") return "买单报关";
   return customs;
+}
+
+/** 报关方式下拉选项(与各模板 data validation 值域一致; 供前端下拉, 用户可覆盖自动映射) */
+const CUSTOMS_OPTIONS: Record<SupplierKey, string[]> = {
+  凯鑫: ["报关退税", "买单报关"],
+  英美: ["买单报关", "报关退税", "合并报关"],
+  星链: ["不需报关", "单独报关", "合并报关（两票及以上需要合并单独报关的）"],
+  航乐: ["委托报关", "报关退税"],
+};
+
+export function getSupplierCustomsOptions(supplier: SupplierKey): string[] {
+  return CUSTOMS_OPTIONS[supplier] ?? [];
 }
 
 /** 航乐「物品属性」: 按品名/用途关键词粗分类(命中不到留空, 人工补填) */
@@ -339,7 +356,7 @@ const SUPPLIERS: Record<SupplierKey, SupplierSpec> = {
       ws.getCell(14, 2).value = opts.customerOrderNo || null; // 客户订单号(留空则清空模板示例)
       b(15, top.hasBattery);                  // 带电
       b(16, top.hasMagnet);                   // 带磁
-      b(17, customsFor("凯鑫", top.customs)); // 报关方式
+      b(17, opts.customsOverride || customsFor("凯鑫", top.customs)); // 报关方式
       // 交税方式: 清关方式 自税→自税递延
       b(18, top.clearance === "自税" ? "自税递延" : top.clearance === "不包税" ? "不包税" : "");
       b(19, top.vatNo);                       // VAT号
@@ -389,10 +406,11 @@ const SUPPLIERS: Record<SupplierKey, SupplierSpec> = {
       ws.getCell(14, 2).value = opts.customerOrderNo || null; // 客户订单号(留空则清空模板示例)
       b(15, top.hasBattery);                  // 带电
       b(16, top.hasMagnet);                   // 带磁
-      b(17, customsFor("英美", top.customs)); // 报关方式
+      b(17, opts.customsOverride || customsFor("英美", top.customs)); // 报关方式
       b(19, top.vatNo);                       // VAT号
       b(20, top.eoriNo);                      // EORI
       b(21, top.currency);                    // 申报币种(透传)
+      b(22, opts.station || "");              // 所在货站(手动覆盖, 否则留模板默认「东莞清溪站点」)
       b(24, top.totalBoxes);                  // 箱数
     },
     mapItem(item) {
@@ -436,11 +454,11 @@ const SUPPLIERS: Record<SupplierKey, SupplierSpec> = {
           ws.getCell(14, 2).value = opts.customerOrderNo || null; // 客户订单号
           b(15, top.hasBattery);                  // 带电
           b(16, top.hasMagnet);                   // 带磁
-          b(17, customsFor("英美", top.customs)); // 报关方式
+          b(17, opts.customsOverride || customsFor("英美", top.customs)); // 报关方式
           b(19, top.vatNo);                       // VAT号
           b(20, top.currency);                    // 申报币种(美线无 EORI, R20 即币种)
+          b(21, opts.station || "");              // 所在货站(手动覆盖, 否则留模板默认「广州站点」)
           b(24, top.totalBoxes);                  // 箱数
-          // R21 所在货站: 留模板默认「广州站点」(同加拿大/英欧模板不覆盖货站的做法)
         },
       },
     ],
@@ -460,7 +478,7 @@ const SUPPLIERS: Record<SupplierKey, SupplierSpec> = {
       ws.getCell(6, 2).value = opts.channelName;       // B6 收货渠道
       ws.getCell(7, 2).value = top.country;            // B7 目的地(用于 INDIRECT 选地址表)
       ws.getCell(8, 2).value = top.totalBoxes;         // B8 总件数
-      ws.getCell(9, 2).value = customsFor("星链", top.customs); // B9 报关类型
+      ws.getCell(9, 2).value = opts.customsOverride || customsFor("星链", top.customs); // B9 报关类型
       ws.getCell(10, 2).value = "否";                   // B10 是否投保
       ws.getCell(11, 2).value = "不投保";               // B11 投保类型
       ws.getCell(12, 6).value = top.warehouseCode;      // F12 FBA仓库码
@@ -517,8 +535,8 @@ const SUPPLIERS: Record<SupplierKey, SupplierSpec> = {
       ws.getCell(4, 2).value = Number(top.zipCode) || top.zipCode; // B4 ZIP
       ws.getCell(5, 2).value = top.warehouseAddress;              // B5 CITY = 仓库地址
       ws.getCell(5, 4).value = "亚马逊";                          // D5 ATTN 收件人
-      ws.getCell(5, 9).value = customsFor("航乐", top.customs);   // I5 报关类型
-      ws.getCell(5, 11).value = "广州白云仓";                     // K5 交货仓库
+      ws.getCell(5, 9).value = opts.customsOverride || customsFor("航乐", top.customs); // I5 报关类型
+      ws.getCell(5, 11).value = opts.station || "广州白云仓";      // K5 交货仓库(手动覆盖, 默认广州白云仓)
       ws.getCell(7, 2).value = top.vatCompany;                    // B7 公司名称
       ws.getCell(7, 9).value = opts.channelName;                  // I7 渠道
       ws.getCell(7, 12).value =                                   // L7 是否包税
@@ -634,6 +652,48 @@ export async function getSupplierChannels(supplier: SupplierKey): Promise<string
 
   channelsCache.set(supplier, channels);
   return channels;
+}
+
+// ============================================================
+// 送货货站/交货仓库下拉数据(从供应商模板读取或内置常量)
+// ============================================================
+
+/** 航乐「交货仓库」下拉值(来自模板 K5 data validation) */
+const HANGYUE_STATIONS = ["广州白云仓", "深圳平湖仓", "深圳福永仓", "浙江义乌仓", "中山航乐仓"];
+
+const stationsCache = new Map<SupplierKey, string[]>();
+
+/** 读取某供应商的送货货站/交货仓库下拉列表(凯鑫/星链无货站字段, 返回空数组) */
+export async function getSupplierStations(supplier: SupplierKey): Promise<string[]> {
+  const cached = stationsCache.get(supplier);
+  if (cached) return cached;
+
+  let stations: string[] = [];
+  if (supplier === "航乐") {
+    stations = [...HANGYUE_STATIONS];
+  } else if (supplier === "英美") {
+    // 英美「站点」sheet A 列(默认模板 R2 起, R1 为表头「站点」); 美线模板同名但无表头, 站点列表一致, 读默认模板即可
+    const spec = SUPPLIERS[supplier];
+    const tplPath = path.join(process.cwd(), "public", "templates", "tr-suppliers", spec.templateFile);
+    if (!fs.existsSync(tplPath)) throw new Error(`供应商模板不存在: ${tplPath}`);
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.readFile(tplPath);
+    const ws = wb.getWorksheet("站点");
+    if (ws) {
+      const seen = new Set<string>();
+      for (let r = 2; r <= ws.rowCount; r++) {
+        const name = cellText(ws.getCell(r, 1));
+        if (name && !seen.has(name)) {
+          seen.add(name);
+          stations.push(name);
+        }
+      }
+    }
+  }
+  // 凯鑫/星链无货站字段 → 空数组(前端不显示货站下拉)
+
+  stationsCache.set(supplier, stations);
+  return stations;
 }
 
 // ============================================================
@@ -783,7 +843,9 @@ export async function convertTrToSupplier(
   sourceFileName: string,
   supplier: SupplierKey,
   customerOrderNo: string,
-  channelName: string
+  channelName: string,
+  customsOverride?: string,
+  station?: string
 ): Promise<TrConvertResult> {
   const baseSpec = SUPPLIERS[supplier];
   if (!baseSpec) throw new Error(`未知供应商: ${supplier}`);
@@ -831,7 +893,7 @@ export async function convertTrToSupplier(
   if (!outSheet) throw new Error(`模板中找不到「${spec.sheetName}」工作表`);
 
   // ── 3. 填充订单头 ──
-  spec.fillHeader(outSheet, top, { customerOrderNo: orderNo, channelName }, items);
+  spec.fillHeader(outSheet, top, { customerOrderNo: orderNo, channelName, customsOverride, station }, items);
 
   // ── 4. 填充数据区(覆盖式: 保留模板数据区全部格式, 仅覆盖值) ──
   const dataStart = spec.headerStartRow;

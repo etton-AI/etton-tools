@@ -1,7 +1,9 @@
 /**
- * POST /api/tr-to-supplier — 上传 TR 客户发票(可批量), 按所选供应商模板转换为供应商下单发票 + 易通系统上传发票(ZIP)
+ * POST /api/tr-to-supplier — 两个入口, 按 mode 区分:
+ *   mode=ettong    入口1: 仅生成「易通系统上传」发票(源发票第 8 行插入空行), 批量 → ZIP
+ *   mode=supplier  入口2: 转供应商发票(供应商 + 渠道 + 每文件独立 SO + 报关方式/送货货站可覆盖), 批量 → ZIP
  * GET  /api/tr-to-supplier?session=xxx — 下载转换结果 ZIP
- * (渠道下拉列表见 channels/route.ts)
+ * (渠道下拉见 channels/route.ts; 报关方式/货站下拉见 options/route.ts)
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -17,8 +19,7 @@ import { writeFileSync, unlinkSync } from "fs";
 
 interface ResultFile {
   sourceFile: string;
-  supplierFile: string;
-  ettongFile: string;
+  outputFile: string; // 生成的发票文件名(入口1=易通上传文件名, 入口2=供应商发票文件名)
   warehouseCode: string;
   totalBoxes: number;
   dataRows: number;
@@ -49,6 +50,7 @@ function errMsg(e: unknown): string {
 }
 
 const VALID_SUPPLIERS: SupplierKey[] = ["凯鑫", "英美", "星链", "航乐"];
+const VALID_MODES = ["ettong", "supplier"];
 
 /** ZIP 内去重文件名, 避免同名覆盖(如 "(2)" 副本) */
 function uniqueName(name: string, used: Set<string>): string {
@@ -75,18 +77,19 @@ export async function POST(request: NextRequest) {
 
     const formData = await request.formData();
     const rawFiles = formData.getAll("file").filter((f): f is File => f instanceof File);
+    const mode = (formData.get("mode") as string) || "supplier";
     const supplier = (formData.get("supplier") as string) || "";
-    const customerOrderNo = ((formData.get("customerOrderNo") as string) || "").trim();
     const channelName = ((formData.get("channelName") as string) || "").trim();
+    // 每文件独立 SO(入口2 supplier 模式, 与 file 顺序对齐; 可留空按源文件名命名)
+    const customerOrderNos = formData.getAll("customerOrderNo").map((v) => String(v).trim());
+    const customsOverride = ((formData.get("customsOverride") as string) || "").trim();
+    const station = ((formData.get("station") as string) || "").trim();
 
     if (rawFiles.length === 0) {
       return NextResponse.json({ error: "请上传至少一份 TR 客户发票（.xlsx）" }, { status: 400 });
     }
-    if (!VALID_SUPPLIERS.includes(supplier as SupplierKey)) {
-      return NextResponse.json({ error: "请选择有效的供应商" }, { status: 400 });
-    }
-    if (!channelName) {
-      return NextResponse.json({ error: "请选择渠道" }, { status: 400 });
+    if (!VALID_MODES.includes(mode)) {
+      return NextResponse.json({ error: "无效的转换模式" }, { status: 400 });
     }
 
     for (const f of rawFiles) {
@@ -96,13 +99,22 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // 入口2 额外校验
+    if (mode === "supplier") {
+      if (!VALID_SUPPLIERS.includes(supplier as SupplierKey)) {
+        return NextResponse.json({ error: "请选择有效的供应商" }, { status: 400 });
+      }
+      if (!channelName) {
+        return NextResponse.json({ error: "请选择渠道" }, { status: 400 });
+      }
+    }
+
     const zip = new JSZip();
-    const ettongFolder = zip.folder("易通系统上传")!;
-    const supplierNames = new Set<string>();
-    const ettongNames = new Set<string>();
+    const outputNames = new Set<string>();
     const files: ResultFile[] = [];
 
-    for (const f of rawFiles) {
+    for (let i = 0; i < rawFiles.length; i++) {
+      const f = rawFiles[i];
       const buffer = Buffer.from(await f.arrayBuffer());
       const tmpPath = join(
         tmpdir(),
@@ -111,49 +123,60 @@ export async function POST(request: NextRequest) {
       writeFileSync(tmpPath, buffer);
       tmpPaths.push(tmpPath);
 
-      // 供应商发票 + 易通系统上传发票
-      const result = await convertTrToSupplier(
-        tmpPath,
-        f.name,
-        supplier as SupplierKey,
-        customerOrderNo,
-        channelName
-      );
-      const ettongBuffer = await buildEttonInvoice(tmpPath);
-
-      const supplierFileName = uniqueName(result.fileName, supplierNames);
-      const ettongFileName = uniqueName(f.name, ettongNames);
-      zip.file(supplierFileName, result.buffer);
-      ettongFolder.file(ettongFileName, ettongBuffer);
-
-      files.push({
-        sourceFile: f.name,
-        supplierFile: supplierFileName,
-        ettongFile: ettongFileName,
-        warehouseCode: result.warehouseCode,
-        totalBoxes: result.totalBoxes,
-        dataRows: result.dataRows,
-        warnings: result.warnings,
-      });
+      if (mode === "ettong") {
+        // 入口1: 仅生成易通系统上传发票(原第 8 行插入空行)
+        const ettongBuffer = await buildEttonInvoice(tmpPath);
+        const name = uniqueName(f.name, outputNames);
+        zip.file(name, ettongBuffer);
+        files.push({
+          sourceFile: f.name,
+          outputFile: name,
+          warehouseCode: "",
+          totalBoxes: 0,
+          dataRows: 0,
+          warnings: [],
+        });
+      } else {
+        // 入口2: 转供应商发票(每文件独立 SO + 报关方式/货站可覆盖)
+        const so = customerOrderNos[i] ?? "";
+        const result = await convertTrToSupplier(
+          tmpPath,
+          f.name,
+          supplier as SupplierKey,
+          so,
+          channelName,
+          customsOverride || undefined,
+          station || undefined
+        );
+        const name = uniqueName(result.fileName, outputNames);
+        zip.file(name, result.buffer);
+        files.push({
+          sourceFile: f.name,
+          outputFile: name,
+          warehouseCode: result.warehouseCode,
+          totalBoxes: result.totalBoxes,
+          dataRows: result.dataRows,
+          warnings: result.warnings,
+        });
+      }
     }
 
     const zipBuffer = Buffer.from(await zip.generateAsync({ type: "nodebuffer" }));
     const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
-    const zipFileName = `TR转${supplier}_${stamp}.zip`;
+    const zipFileName = mode === "ettong" ? `易通系统上传_${stamp}.zip` : `TR转${supplier}_${stamp}.zip`;
 
     const sessionId = makeSessionId();
     store.set(sessionId, { zipBuffer, zipFileName, createdAt: Date.now() });
 
-    console.log(
-      `✅ TR convert: ${files.length} 份发票 → ${supplier} / 渠道「${channelName}」 → ${zipFileName}`
-    );
+    console.log(`✅ TR convert [${mode}]: ${files.length} 份发票 → ${zipFileName}`);
 
     return NextResponse.json({
       sessionId,
       result: {
         zipFileName,
-        supplier,
-        channel: channelName,
+        mode,
+        supplier: mode === "supplier" ? supplier : "",
+        channel: mode === "supplier" ? channelName : "",
         total: files.length,
         files,
         downloadUrl: `/api/tr-to-supplier?session=${sessionId}`,
