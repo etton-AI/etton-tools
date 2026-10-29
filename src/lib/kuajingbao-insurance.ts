@@ -16,12 +16,14 @@
  *   2. 货值：总申报货值求和（四舍五入 2 位）
  *   3. 币种：申报币种 → 中文名（USD → 美元）
  *   4. 备注：仅「全美锁仓」渠道（客户渠道含「全美」）+ 入仓编号溢出的多余 FBA
+ *   5. 公斤数：一票内无易碎品 → 取「货箱重量」（实际入仓毛重）；有易碎品 → 按行（单箱毛重×总箱数）累加
  *
  * 审核（2026-10 新增）：
  *   a. 易碎品拆分：按「材质」判定易碎（玻璃/陶瓷/大理石/水晶/亚克力及其制品），
  *      一票内同时含易碎与非易碎时拆成两票（易碎那票货物类别「是易碎品」、非易碎「无易碎品」）。
  *   b. 币种校验：按目的国预期申报币种（如德国→EUR），与清单申报币种不一致时告警。
- *   c. FBA 仓校验：入仓编号不含「FBA」字眼时判定为非 FBA 仓（卫星仓/沃尔玛仓）告警。
+ *   c. 目的地类型自动识别 + 非 FBA 仓告警：按入仓编号/仓库代码识别 FBA/沃尔玛/卫星/海外仓，
+ *      自动填「目的地类型」列；入仓编号不含「FBA」字眼时告警（如沃尔玛仓/卫星仓/海外仓）。
  */
 
 import ExcelJS from "exceljs";
@@ -52,6 +54,7 @@ export interface SoGroup {
   workOrder: string;       // 工作号（仅用于展示/排查）
   country: string;         // 国家 → 目的国
   warehouseCode: string;   // 仓库代码 → 目的地
+  destType: string;        // 目的地类型（按入仓编号/仓库代码自动识别，见 detectDestType）
   fbaList: string[];       // 该票全部 FBA 号（去箱序后缀、去重、保持出现顺序）
   fbaBase: string;         // 入仓编号（fbaList 以空格连接，≤350 字符；超出部分见 remark）
   channel: string;         // 客户渠道（判断是否全美锁仓）
@@ -78,6 +81,7 @@ export interface CurrencyWarning {
 export interface NonFbaWarning {
   so: string;          // 系统SO
   fbaCodes: string[];  // 不含「FBA」字眼的入仓编号
+  destType: string;    // 该票识别到的目的地类型（用于告警展示）
 }
 
 export interface KuajingbaoResult {
@@ -127,13 +131,21 @@ const INSURED = "易通科技物流（中山）有限公司";
 const TYPE = "企业";
 const ORIGIN_COUNTRY = "中国";
 const CLAIM_PLACE = "HANGZHOU CHINA";
-const DEST_TYPE = "FBA";
 const SHELF_GUARANTEE = "保上架";
 const RATIO = 1; // 加成比例 100%
 
 /** 货物类别：按材质判定 */
 const GOODS_CATEGORY_FRAGILE = "是易碎品";
 const GOODS_CATEGORY_NORMAL = "无易碎品";
+
+/**
+ * 目的地类型（模板第 9 列），按该票入仓编号/仓库代码自动识别。
+ * 值必须与模板「目的地类型」下拉选项完全一致。
+ */
+const DEST_TYPE_FBA = "FBA";
+const DEST_TYPE_WALMART = "沃尔玛仓";
+const DEST_TYPE_SATELLITE = "卫星仓/AWD";
+const DEST_TYPE_OVERSEAS = "其他海外仓";
 
 /** 币种映射：申报币种代码 → 中文名 */
 const CURRENCY_MAP: Record<string, string> = {
@@ -287,6 +299,22 @@ function isFbaCode(fbaCode: string): boolean {
   return fbaCode.toUpperCase().includes("FBA");
 }
 
+/**
+ * 目的地类型自动识别：按该票入仓编号（FBA 号）与仓库代码判断。
+ * - 仓库代码含「WAL」或入仓编号含「WFB」→ 沃尔玛仓
+ * - 入仓编号含「STAR」→ 卫星仓/AWD
+ * - 入仓编号含「OWS」→ 其他海外仓
+ * - 其余 → FBA（含「FBA」或无法识别的编号都归 FBA，无法识别的走非 FBA 告警）
+ */
+function detectDestType(fbaList: string[], warehouseCode: string): string {
+  const wh = warehouseCode.toUpperCase();
+  const ids = fbaList.join(" ").toUpperCase();
+  if (wh.includes("WAL") || ids.includes("WFB")) return DEST_TYPE_WALMART;
+  if (ids.includes("STAR")) return DEST_TYPE_SATELLITE;
+  if (ids.includes("OWS")) return DEST_TYPE_OVERSEAS;
+  return DEST_TYPE_FBA;
+}
+
 /** 清洗文件名非法字符 */
 function sanitizeFileName(name: string): string {
   const cleaned = name.replace(/[\\/:*?"<>|]/g, "_").trim();
@@ -378,6 +406,7 @@ interface SoAccumulator {
   currency: string;
   boxWeight: number; // 货箱重量（合并单元格总值，仅兜底用）
   fbaList: string[];
+  destType: string;  // 目的地类型（按入仓编号/仓库代码自动识别）
   rows: CargoRow[];
 }
 
@@ -408,13 +437,21 @@ function buildGroup(acc: SoAccumulator, rows: CargoRow[], isFragile: boolean, or
     if (r.fbaId && !fbaList.includes(r.fbaId)) fbaList.push(r.fbaId);
   }
 
-  // 公斤数：优先按行（单箱毛重×箱数）累加；无按行重量时用合并单元格货箱重量兜底
-  let totalWeight = round2(rows.reduce((s, r) => s + r.rowWeight, 0));
-  if (totalWeight === 0 && acc.boxWeight > 0) {
-    // 兜底：拆分组按货值占比分摊总值，非拆分整取
-    const groupValue = rows.reduce((s, r) => s + r.value, 0);
-    const allValue = acc.rows.reduce((s, r) => s + r.value, 0);
-    totalWeight = allValue > 0 ? round2((acc.boxWeight * groupValue) / allValue) : round2(acc.boxWeight);
+  // 公斤数：
+  // - 一票内无易碎品 → 直接取「货箱重量」（实际入仓毛重总值，而非客户预计公斤）
+  // - 一票内有易碎品 → 才按行拆分，公斤数按行（单箱毛重×总箱数）累加
+  const hasFragile = acc.rows.some((r) => r.isFragile);
+  let totalWeight: number;
+  if (hasFragile) {
+    totalWeight = round2(rows.reduce((s, r) => s + r.rowWeight, 0));
+    // 兜底：按行重量为 0 时（缺少单箱毛重），按货值占比分摊货箱重量
+    if (totalWeight === 0 && acc.boxWeight > 0) {
+      const groupValue = rows.reduce((s, r) => s + r.value, 0);
+      const allValue = acc.rows.reduce((s, r) => s + r.value, 0);
+      totalWeight = allValue > 0 ? round2((acc.boxWeight * groupValue) / allValue) : round2(acc.boxWeight);
+    }
+  } else {
+    totalWeight = round2(acc.boxWeight);
   }
 
   return {
@@ -423,6 +460,7 @@ function buildGroup(acc: SoAccumulator, rows: CargoRow[], isFragile: boolean, or
     workOrder: acc.workOrder,
     country: acc.country,
     warehouseCode: acc.warehouseCode,
+    destType: acc.destType,
     fbaList,
     fbaBase: "",
     channel: acc.channel,
@@ -501,6 +539,7 @@ function parseCargoList(ws: ExcelJS.Worksheet): ParseResult {
         // 若放进逐行累加，ExcelJS 会把合并格的值在合并区每行都读到 → 总公斤数被乘 N 倍。
         boxWeight: cellNum(ws.getCell(r, col.boxWeight)),
         fbaList: [],
+        destType: "",
         rows: [],
       });
     }
@@ -567,10 +606,11 @@ function parseCargoList(ws: ExcelJS.Worksheet): ParseResult {
       });
     }
 
-    // 审核 c：FBA 仓校验（入仓编号不含「FBA」字眼 → 疑似非 FBA 仓）
+    // 审核 c：目的地类型识别 + 非 FBA 仓告警（入仓编号不含「FBA」字眼 → 非 FBA 仓）
+    acc.destType = detectDestType(acc.fbaList, acc.warehouseCode);
     const nonFbaCodes = acc.fbaList.filter((f) => !isFbaCode(f));
     if (nonFbaCodes.length > 0) {
-      nonFbaWarnings.push({ so: acc.so, fbaCodes: nonFbaCodes });
+      nonFbaWarnings.push({ so: acc.so, fbaCodes: nonFbaCodes, destType: acc.destType });
     }
 
     // 审核 a：按材质拆分易碎/非易碎
@@ -672,7 +712,7 @@ function fillTemplate(
       g.orderNo,               // 6 运输工具名称及航次（与原单号一致）
       g.orderNo,               // 7 提单号（与原单号一致）
       config.deliveryMethod,   // 8 派送方式
-      DEST_TYPE,               // 9 目的地类型
+      g.destType,              // 9 目的地类型（按入仓编号/仓库代码自动识别）
       null,                    // 10 快递公司
       null,                    // 11 快递单号
       g.fbaBase,               // 12 入仓编号

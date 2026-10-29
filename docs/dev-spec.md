@@ -1417,6 +1417,21 @@ interface PacificSplitResult {
     - **新增端点** `GET /api/tr-to-supplier/options?supplier=` 返回 `{ customs[], stations[] }` 供前端下拉。
     - 位置：`src/lib/tr-to-supplier.ts`（`CUSTOMS_OPTIONS`/`HANGYUE_STATIONS`/`getSupplierCustomsOptions`/`getSupplierStations`、fillHeader opts 扩展、`convertTrToSupplier` 加参）、`src/app/api/tr-to-supplier/route.ts`（mode 分支）、`src/app/api/tr-to-supplier/options/route.ts`（新增）、`src/app/tr-to-supplier/page.tsx`（`EttongEntry`/`SupplierEntry` 两入口）
 
+108. **跨境堡批量投保：总公斤数按「是否有易碎品」取值（无易碎品取货箱重量，有易碎品按行累加）** (2026-10-29)
+    - 需求：输出总毛重原按「单箱货物毛重×总箱数」（客户预估公斤）累加，应改为按实际入仓毛重。规则：① 先判断一票是否分易碎/非易碎；② 无易碎品 → 总公斤数直接取清单「货箱重量」（实际入仓毛重总值）；③ 有易碎品 → 才按行拆分，公斤数按行（单箱毛重×总箱数）累加。
+    - 背景：货箱重量是入仓按票称重的实际毛重，单箱货物毛重是客户预估。无易碎品的票无需拆分，直接用实际值更准；含易碎品的票要拆易碎/非易碎两票，货箱重量是整票总值无法按行拆分，故按行估算。
+    - **实现**：`buildGroup` 内用 `acc.rows.some(r => r.isFragile)` 判断该 SO 是否含易碎行；含 → `round2(Σ rowWeight)`（保留「按行重量为 0 时按货值占比分摊货箱重量」兜底）；不含 → `round2(acc.boxWeight)`。取代旧的「一律按行累加、仅无按行重量时用货箱重量兜底」逻辑。
+    - **验证**：对照 `箱货清单-KWCJ26100002 (1).xlsx` 与 `【正确的写法】…_跨境堡投保箱单.xlsx`——`KWCJ26100001`/`KWCJ26100002`（无易碎）总公斤数 106.8/129.6（=货箱重量，而非按行 105.6/128.0）；`TRKJ26100067`/`TRKJ26100068`（含易碎）拆两票后按行 71.5/81、400.4/48.6，与正确文件全部一致。
+    - 位置：`src/lib/kuajingbao-insurance.ts`（`buildGroup` 公斤数逻辑）
+
+109. **跨境堡批量投保：目的地类型按入仓编号/仓库代码自动识别（不再固定 FBA）** (2026-10-29)
+    - 需求：目的地类型（模板第 9 列）原来写死 `FBA`，但货箱清单里混有沃尔玛仓、卫星仓、海外仓等非 FBA 仓，需要自动识别并填入正确类型（除了告警，一并修改输出列）。
+    - **识别信号**（大小写不敏感，按该票入仓编号 + 仓库代码判断）：仓库代码含 `WAL` 或入仓编号含 `WFB` → `沃尔玛仓`；入仓编号含 `STAR` → `卫星仓/AWD`；入仓编号含 `OWS` → `其他海外仓`；其余（含 `FBA` 或无法识别）→ `FBA`。
+    - **实现**：新增 `detectDestType(fbaList, warehouseCode)`；`SoGroup`/`SoAccumulator` 加 `destType` 字段，`parseCargoList` 审核 c 阶段算 `acc.destType` 并填 `nonFbaWarnings[].destType`；`buildGroup` 透传；`fillTemplate` 第 9 列由常量 `DEST_TYPE` 改为 `g.destType`。
+    - **告警升级**：`NonFbaWarning` 加 `destType`，非 FBA 仓告警文案从「疑似卫星仓/沃尔玛仓等非 FBA 仓」改为「已识别为『{destType}』」（无法识别时「无法识别仓类型，暂按 FBA 填写」）。前端预览表新增「目的地类型」列，非 FBA 类型高亮。
+    - **验证**：`KWCJ26100001`/`KWCJ26100002`（`ATL1-WAL`/`MCI1n-WAL` + `323948xWFB`）→ 沃尔玛仓，与正确文件一致；`TRKJ26090124`（`STAR-SBCVDCB3G5W5E`）→ 卫星仓/AWD。
+    - 位置：`src/lib/kuajingbao-insurance.ts`（`DEST_TYPE_*`/`detectDestType`/`SoGroup.destType`/`SoAccumulator.destType`/`buildGroup`/`fillTemplate`）、`src/app/api/kuajingbao-insurance/route.ts`（响应加 `destType`）、`src/app/kuajingbao-insurance/page.tsx`（告警文案 + 预览列）
+
 ### 待重构项
 
 - [ ] 将 session 存储从内存 Map 改为临时文件或 Redis

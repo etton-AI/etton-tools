@@ -11,6 +11,7 @@ interface GroupItem {
   orderNo: string;
   country: string;
   warehouseCode: string;
+  destType: string;
   goodsDescription: string;
   goodsCategory: string;
   isFragile: boolean;
@@ -32,6 +33,7 @@ interface CurrencyWarning {
 interface NonFbaWarning {
   so: string;
   fbaCodes: string[];
+  destType: string;
 }
 
 interface SplitInfo {
@@ -326,16 +328,20 @@ export default function KuajingbaoInsurancePage() {
               )}
 
               {result.nonFbaWarnings.length > 0 && (
-                <div className="rounded-lg border border-red-300 bg-red-50 p-4">
-                  <p className="text-sm font-semibold text-red-700">
-                    🚫 疑似非 FBA 仓（{result.nonFbaWarnings.length} 票，请确认是否按 FBA 投保）
+                <div className="rounded-lg border border-amber-300 bg-amber-50 p-4">
+                  <p className="text-sm font-semibold text-amber-800">
+                    ⚠️ 非 FBA 仓（{result.nonFbaWarnings.length} 票，目的地类型已自动填入，请人工确认）
                   </p>
-                  <ul className="mt-2 space-y-1 text-sm text-red-700">
+                  <ul className="mt-2 space-y-1 text-sm text-amber-800">
                     {result.nonFbaWarnings.map((w) => (
                       <li key={w.so}>
                         <span className="font-mono text-xs">{w.so}</span>
                         ：入仓编号 <span className="font-mono text-xs">{w.fbaCodes.join(" ")}</span> 不含「FBA」字眼，
-                        疑似卫星仓 / 沃尔玛仓等非 FBA 仓
+                        {w.destType !== "FBA" ? (
+                          <>已识别为「<span className="font-semibold">{w.destType}</span>」</>
+                        ) : (
+                          <>无法识别仓类型，暂按「FBA」填写</>
+                        )}
                       </li>
                     ))}
                   </ul>
@@ -396,6 +402,7 @@ export default function KuajingbaoInsurancePage() {
                     <th className="px-4 py-2 font-medium">原单号</th>
                     <th className="px-4 py-2 font-medium">货物类别</th>
                     <th className="px-4 py-2 font-medium">仓库</th>
+                    <th className="px-4 py-2 font-medium">目的地类型</th>
                     <th className="px-4 py-2 font-medium">货物描述</th>
                     <th className="px-4 py-2 font-medium">币种</th>
                     <th className="px-4 py-2 font-medium">货值</th>
@@ -416,6 +423,15 @@ export default function KuajingbaoInsurancePage() {
                         )}
                       </td>
                       <td className="whitespace-nowrap px-4 py-2 font-mono text-xs">{g.warehouseCode}</td>
+                      <td className="whitespace-nowrap px-4 py-2">
+                        {g.destType === "FBA" ? (
+                          <span className="text-xs text-zinc-600">{g.destType}</span>
+                        ) : (
+                          <span className="rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-700">
+                            {g.destType}
+                          </span>
+                        )}
+                      </td>
                       <td className="px-4 py-2">{g.goodsDescription}</td>
                       <td className="whitespace-nowrap px-4 py-2">{g.currency}</td>
                       <td className="whitespace-nowrap px-4 py-2 text-right">{g.totalValue.toFixed(2)}</td>
@@ -443,7 +459,7 @@ export default function KuajingbaoInsurancePage() {
           <p>
             💡 自动完成：货物描述（品名+数量PCS）、货值（总申报货值求和）、币种（申报币种转中文）、
             货物类别（按材质自动判定易碎/非易碎）、备注（「全美锁仓」渠道按仓库代码生成 AGL 备注）。
-            审核：按材质拆分易碎/非易碎、按目的国校验币种、按 FBA ID 识别疑似非 FBA 仓。
+            审核：按材质拆分易碎/非易碎、按目的国校验币种、按入仓编号/仓库代码自动识别目的地类型（FBA/沃尔玛/卫星/海外仓）。
           </p>
         </div>
       )}

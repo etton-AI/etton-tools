@@ -98,6 +98,7 @@ export async function POST(request: NextRequest) {
         orderNo: g.orderNo,
         country: g.country,
         warehouseCode: g.warehouseCode,
+        destType: g.destType,
         goodsDescription: g.goodsDescription,
         goodsCategory: g.goodsCategory,
         isFragile: g.isFragile,
