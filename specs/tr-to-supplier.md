@@ -137,6 +137,7 @@ ASIN(X)。
 
 - `xl/worksheets/sheetN.xml`：`<row r="N">`、`<c r="ColN">`、`<mergeCell ref="...">`、`<dimension ref="...">` 中行号 ≥ 8 的部分 +1；**并在第 8 行补一个空 `<row r="8"/>`**（下移后第 8 行缺失，易通系统按行号读取时 `getRow(7)` 返回 null 会 `NullPointerException`）
 - `xl/drawings/drawing1.xml`：`<xdr:row>`（0 基行号 ≥ 7）锚点 +1，图片随之移动
+- **收件人国家转中文**：源发票 F8 收件人国家是英文代码（如 `US`），易通系统上传要求中文，故下移后（F9）把国家代码转中文（`US→美国`、`DE→德国`、`GB→英国` 等，映射见 `COUNTRY_CN`），改为内联字符串 `t="inlineStr"`（不改 sharedStrings，避免误改他处引用）
 - 图片实体 `xl/media/*` 原样保留
 
 ## 7. API 接口

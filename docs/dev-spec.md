@@ -1455,6 +1455,12 @@ interface PacificSplitResult {
     - 教训：OOXML 允许稀疏行（Excel/WPS 都能打开），但**第三方 Java 解析器可能假设行连续或按行号随机访问**，缺失行会 NPE。插入行位移时务必保留目标行的空 `<row>` 元素。
     - 位置：`src/lib/tr-to-supplier.ts`（`shiftRowRefsInSheetXml` 第 5 步补空行）
 
+113. **易通系统上传：收件人国家自动转中文** (2026-11-03)
+    - 需求：易通系统上传发票的「收件人国家」字段要求中文（如 `US` → `美国`），源 TR 发票 F8 是英文代码，导入时须转中文。
+    - 实现：`buildEttonInvoice` 行位移后，`localizeCountryCell` 定位 F9 单元格（原 F8 下移一行）：若为 `t="s"` 共享字符串，经 `getSharedStringText` 从 `xl/sharedStrings.xml` 读回英文代码（支持富文本 run 拼接），查 `COUNTRY_CN` 映射得中文，改写为 `t="inlineStr"` 内联字符串 `<is><t>美国</t></is>`。
+    - 坑：**只改单元格为 inlineStr、不改 sharedStrings 表**——英文代码可能在表内被他处共享引用，直接改 sharedStrings 会误伤；读回时须按 `<si>` 顺序取第 `index` 个（`<v>` 里的数字是 sharedStrings 下标），不能按值查找。
+    - 位置：`src/lib/tr-to-supplier.ts`（`COUNTRY_CN`、`getSharedStringText`、`localizeCountryCell`、`buildEttonInvoice` 调用）
+
 ### 待重构项
 
 - [ ] 将 session 存储从内存 Map 改为临时文件或 Redis

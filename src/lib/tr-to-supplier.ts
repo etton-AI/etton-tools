@@ -1048,7 +1048,58 @@ function shiftRowsInDrawingXml(xml: string, fromRow: number): string {
   });
 }
 
-/** 生成「易通系统上传」发票 = 源发票第 8 行插入空行(保留原格式/图片/合并单元格) */
+/** 收件人国家英文代码 → 中文（易通系统上传要求国家字段为中文） */
+const COUNTRY_CN: Record<string, string> = {
+  US: "美国",
+  DE: "德国",
+  GB: "英国",
+  FR: "法国",
+  IT: "意大利",
+  ES: "西班牙",
+  JP: "日本",
+  CA: "加拿大",
+  AU: "澳大利亚",
+  NL: "荷兰",
+  MX: "墨西哥",
+  BE: "比利时",
+};
+
+/** 从 sharedStrings.xml 读第 index 个字符串文本（含富文本 run 拼接） */
+function getSharedStringText(sharedStringsXml: string, index: number): string {
+  const re = /<si>([\s\S]*?)<\/si>/g;
+  let i = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(sharedStringsXml))) {
+    if (i === index) {
+      let text = "";
+      const tRe = /<t[^>]*>([\s\S]*?)<\/t>/g;
+      let tm: RegExpExecArray | null;
+      while ((tm = tRe.exec(m[1]))) text += tm[1];
+      return text;
+    }
+    i++;
+  }
+  return "";
+}
+
+/** 把收件人国家单元格(行位移后为 F9, 原 F8)的英文国家代码转为中文内联字符串 */
+function localizeCountryCell(sheetXml: string, sharedStringsXml: string): string {
+  const cellRe = /<c r="F9"([^>]*)>([\s\S]*?)<\/c>/;
+  const cellMatch = cellRe.exec(sheetXml);
+  if (!cellMatch) return sheetXml;
+  const attrs = cellMatch[1];
+  const inner = cellMatch[2];
+  if (!/t="s"/.test(attrs)) return sheetXml; // 非共享字符串(已内联), 跳过
+  const vMatch = /<v>(\d+)<\/v>/.exec(inner);
+  if (!vMatch) return sheetXml;
+  const code = getSharedStringText(sharedStringsXml, parseInt(vMatch[1], 10)).trim().toUpperCase();
+  const cn = COUNTRY_CN[code];
+  if (!cn) return sheetXml;
+  const newCell = `<c r="F9"${attrs.replace(/t="s"/, 't="inlineStr"')}><is><t>${cn}</t></is></c>`;
+  return sheetXml.replace(cellMatch[0], newCell);
+}
+
+/** 生成「易通系统上传」发票 = 源发票第 8 行插入空行(保留原格式/图片/合并单元格) + 收件人国家转中文 */
 export async function buildEttonInvoice(filePath: string): Promise<Buffer> {
   const raw = fs.readFileSync(filePath);
   const zip = await JSZip.loadAsync(raw);
@@ -1062,7 +1113,13 @@ export async function buildEttonInvoice(filePath: string): Promise<Buffer> {
 
   const sheetFile = zip.file(sheetPath);
   if (!sheetFile) throw new Error(`易通发票中找不到工作表文件: ${sheetPath}`);
-  zip.file(sheetPath, shiftRowRefsInSheetXml(await sheetFile.async("string"), ETON_INSERT_ROW));
+  const sharedStrings = (await zip.file("xl/sharedStrings.xml")?.async("string")) || "";
+
+  // 1. 第 8 行插入空行(行号下移)
+  let sheetXml = shiftRowRefsInSheetXml(await sheetFile.async("string"), ETON_INSERT_ROW);
+  // 2. 收件人国家英文代码转中文(F8 已下移到 F9)
+  sheetXml = localizeCountryCell(sheetXml, sharedStrings);
+  zip.file(sheetPath, sheetXml);
 
   // 浮动图片锚点同步下移
   const drawingFile = zip.file("xl/drawings/drawing1.xml");
