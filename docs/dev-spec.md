@@ -1443,7 +1443,7 @@ interface PacificSplitResult {
 
 111. **派送方式选错提醒推广到易通上传入口 + 朗胜/延讯** (2026-11-03)
     - 延续 #110，把同一提醒机制覆盖到其余三个转换功能：
-    - **易通系统上传入口（入口1，`tr-to-supplier` mode=`ettong`）**：无渠道选择，故做**被动存在式提醒**——对上传文件名 `detectDeliveryMethod` 去重得 `sourceMethods`，只要出现非「卡派」的派送方式（海派/UPS派）即显示黄色提示框「检测到派送方式 X，上传易通下单时勿习惯性误选卡派」。无 confirm/后端 warnings（工具本身不选渠道，提醒对象是同事在易通系统里的人工勾选）。
+    - **易通系统上传入口（入口1，`tr-to-supplier` mode=`ettong`）**：无渠道选择，故做**存在式提醒**——对上传文件名 `detectDeliveryMethod` 去重得 `sourceMethods`，只要出现非「卡派」的派送方式（海派/UPS派）即显示黄色提示框 + 点「生成易通系统上传发票」时 `window.confirm` 二次确认（须点击「确定」，避免同事习惯性忽略）。无后端 warnings（工具本身不选渠道，提醒对象是同事在易通系统里的人工勾选）。
     - **朗胜转美线 `/ls-to-supplier`**：有渠道选择，做与入口2 相同的**不匹配提醒**——前端 `sourceMethod`（源文件名）vs `channelMethod`（所选渠道）不一致 → 黄色告警 + `window.confirm`；后端 `convertLsToSupplier` 用文件名 + B7 `top.channel` vs `opts.channelName` 写 `warnings[]` 兜底。渠道清单含 `KC-卡车派送`（卡派）、`KD-快递派送`（快递派），故 `detectDeliveryMethod` 补了 `卡车` 关键词。
     - **延讯转供应商 `/yx-to-tiantu`**：多文件，前端 `sourceMethods`（所有文件名去重）vs `channelMethod` 不一致 → 告警 + confirm；后端 `convertYxToSupplier` 写 warnings（`convertYxBatch` 自动聚合，单张/批量都覆盖）。
     - 位置：`src/lib/ettong-to-supplier.ts`（import + `convertLsToSupplier`/`convertYxToSupplier` 写 warnings）、`src/app/tr-to-supplier/page.tsx`（入口1 被动提醒）、`src/app/ls-to-supplier/page.tsx`、`src/app/yx-to-tiantu/page.tsx`（前端告警 + confirm）

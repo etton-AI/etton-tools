@@ -145,6 +145,15 @@ function EttongEntry() {
       setError("请先上传 TR 客户发票文件");
       return;
     }
+
+    // 检测到海派/UPS派等非卡派派送方式时, 弹窗确认(须点击, 避免同事习惯性忽略)
+    if (warnMethods.length > 0) {
+      const ok = window.confirm(
+        `⚠️ 检测到派送方式：${warnMethods.join("、")}\n\n上传到易通系统下单时，请勿习惯性误选「卡派」渠道；客户下单为${warnMethods.join("、")}，应按对应派送方式下单。\n\n确认已了解后继续生成。`
+      );
+      if (!ok) return;
+    }
+
     setProcessing(true);
     setError(null);
     setResult(null);
@@ -165,7 +174,7 @@ function EttongEntry() {
     } finally {
       setProcessing(false);
     }
-  }, [files]);
+  }, [files, warnMethods]);
 
   const reset = useCallback(() => {
     setResult(null);
