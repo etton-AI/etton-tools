@@ -135,7 +135,7 @@ ASIN(X)。
 
 实现为 **xlsx 原始 XML 行位移**（非 ExcelJS 重写），以保留源文件浮动图片 / 合并单元格 / 格式：
 
-- `xl/worksheets/sheetN.xml`：`<row r="N">`、`<c r="ColN">`、`<mergeCell ref="...">`、`<dimension ref="...">` 中行号 ≥ 8 的部分 +1
+- `xl/worksheets/sheetN.xml`：`<row r="N">`、`<c r="ColN">`、`<mergeCell ref="...">`、`<dimension ref="...">` 中行号 ≥ 8 的部分 +1；**并在第 8 行补一个空 `<row r="8"/>`**（下移后第 8 行缺失，易通系统按行号读取时 `getRow(7)` 返回 null 会 `NullPointerException`）
 - `xl/drawings/drawing1.xml`：`<xdr:row>`（0 基行号 ≥ 7）锚点 +1，图片随之移动
 - 图片实体 `xl/media/*` 原样保留
 

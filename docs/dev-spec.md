@@ -1448,6 +1448,13 @@ interface PacificSplitResult {
     - **延讯转供应商 `/yx-to-tiantu`**：多文件，前端 `sourceMethods`（所有文件名去重）vs `channelMethod` 不一致 → 告警 + confirm；后端 `convertYxToSupplier` 写 warnings（`convertYxBatch` 自动聚合，单张/批量都覆盖）。
     - 位置：`src/lib/ettong-to-supplier.ts`（import + `convertLsToSupplier`/`convertYxToSupplier` 写 warnings）、`src/app/tr-to-supplier/page.tsx`（入口1 被动提醒）、`src/app/ls-to-supplier/page.tsx`、`src/app/yx-to-tiantu/page.tsx`（前端告警 + confirm）
 
+112. **易通系统上传：第 8 行插空行导致 Java NullPointerException** (2026-11-03)
+    - 现象：入口1「易通系统上传」生成的文件导入易通系统报 `java.lang.NullPointerException`。
+    - 根因：`buildEttonInvoice` 的 `shiftRowRefsInSheetXml` 把第 8 行及以下行号 +1（原第 8 行移到第 9 行），但**没在第 8 行补空行元素**，导致生成的 sheet1.xml 里 `<row r="7">` 后直接是 `<row r="9">`，第 8 行的 `<row r="8">` 缺失。易通系统（Java/POI）按行号读取第 8 行时 `getRow(7)` 返回 `null`，后续 `.getCell()` 触发 NPE。
+    - 修复：`shiftRowRefsInSheetXml` 下移后，若第 `fromRow` 行缺失且第 `fromRow+1` 行存在，则在第 `fromRow` 行位置补一个空 `<row r="8"/>`（自闭合，无 cell），使行号 1~N 连续无跳号。
+    - 教训：OOXML 允许稀疏行（Excel/WPS 都能打开），但**第三方 Java 解析器可能假设行连续或按行号随机访问**，缺失行会 NPE。插入行位移时务必保留目标行的空 `<row>` 元素。
+    - 位置：`src/lib/tr-to-supplier.ts`（`shiftRowRefsInSheetXml` 第 5 步补空行）
+
 ### 待重构项
 
 - [ ] 将 session 存储从内存 Map 改为临时文件或 Redis

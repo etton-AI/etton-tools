@@ -1007,7 +1007,7 @@ function resolveWorksheetTarget(wbXml: string, relsXml: string, sheetName: strin
   return null;
 }
 
-/** sheet XML: 将 fromRow(1-based) 起的行/单元格/合并单元格/尺寸范围全部下移一行 */
+/** sheet XML: 将 fromRow(1-based) 起的行/单元格/合并单元格/尺寸范围全部下移一行, 并在 fromRow 行补空行 */
 function shiftRowRefsInSheetXml(xml: string, fromRow: number): string {
   // 1. dimension 范围
   xml = xml.replace(/<dimension ref="([A-Z]+)(\d+):([A-Z]+)(\d+)"/g, (m, c1, r1s, c2, r2s) => {
@@ -1031,6 +1031,11 @@ function shiftRowRefsInSheetXml(xml: string, fromRow: number): string {
     const r2 = parseInt(r2s, 10);
     return `<mergeCell ref="${c1}${r1 >= fromRow ? r1 + 1 : r1}:${c2}${r2 >= fromRow ? r2 + 1 : r2}"`;
   });
+  // 5. 在 fromRow 行补一个空 <row r="fromRow"/>（下移后该行缺失, 易通系统按行号读取时 getRow 返回 null 会 NPE）
+  const next = fromRow + 1;
+  if (!xml.includes(`<row r="${fromRow}"`) && xml.includes(`<row r="${next}"`)) {
+    xml = xml.replace(`<row r="${next}"`, `<row r="${fromRow}"/><row r="${next}"`);
+  }
   return xml;
 }
 
