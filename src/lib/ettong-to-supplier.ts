@@ -22,6 +22,7 @@ import ExcelJS from "exceljs";
 import JSZip from "jszip";
 import path from "path";
 import fs from "fs";
+import { detectDeliveryMethod } from "@/lib/delivery-method";
 
 // ============================================================
 // Types
@@ -456,6 +457,15 @@ export async function convertLsToSupplier(
   const files: LsFileEntry[] = [];
   const skipped: { sku: string; reason: string }[] = [];
   const zip = new JSZip();
+
+  // ── 派送方式选错提醒：源发票（文件名 + B7 服务渠道）vs 所选渠道 ──
+  const lsSourceMethod = detectDeliveryMethod(sourceFileName, top.channel);
+  const lsChannelMethod = detectDeliveryMethod(opts.channelName);
+  if (lsSourceMethod && lsChannelMethod && lsSourceMethod !== lsChannelMethod) {
+    warnings.push(
+      `派送方式不一致：源发票为「${lsSourceMethod}」（${top.channel || sourceFileName}），所选渠道「${opts.channelName}」为「${lsChannelMethod}」，请核对渠道是否选错`
+    );
+  }
 
   if (pairList) {
     // 按文件名匹配到分组：为每个 SKU 建立 SO 队列（保持顺序，支持同一 SKU 多个 SO）
@@ -971,6 +981,15 @@ export async function convertYxToSupplier(
   if (!top.warehouseCode) warnings.push("源模板缺少仓库代码");
   if (supplier === "皓鹏") {
     warnings.push("皓鹏收件地址字段为模板示例值，需人工核对或从地址库编码表填充");
+  }
+
+  // ── 派送方式选错提醒：源发票（文件名 + B7 服务渠道）vs 所选渠道 ──
+  const yxSourceMethod = detectDeliveryMethod(sourceFileName, top.channel);
+  const yxChannelMethod = detectDeliveryMethod(opts.channelName);
+  if (yxSourceMethod && yxChannelMethod && yxSourceMethod !== yxChannelMethod) {
+    warnings.push(
+      `派送方式不一致：源发票为「${yxSourceMethod}」（${top.channel || sourceFileName}），所选渠道「${opts.channelName}」为「${yxChannelMethod}」，请核对渠道是否选错`
+    );
   }
 
   return {

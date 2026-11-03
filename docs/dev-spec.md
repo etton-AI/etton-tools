@@ -688,6 +688,7 @@ interface PacificSplitResult {
 - 收件地址为模板内 VLOOKUP 公式（凯鑫/英美）或 INDIRECT 选表（星链），写仓库代码自动带出
 - 英美双模板：按源「收件人国家」自动切换——美线（US/USA）用「英美-美国模板.xlsx」（无 EORI，R20 即币种，数据区 24 列），其余用「英美-模板.xlsx」（R20 EORI、R21 币种，数据区 26 列），渠道下拉合并两模板（约 309 条），见已知坑 #106
 - 航乐：SHIPMENT ID / AMAZON REFERENCE ID = 逗号连接货箱编号 / refId；ZIP/CITY 取源 F10/F11（仓库地址/邮编）；材重 = 长×宽×高 ÷ 6000、CBM = 长×宽×高 ÷ 1e6、净重(单个) = 净重 ÷ 单箱数量；物品属性按关键词粗分类（灯类/玩具类/服装类）
+- **派送方式选错提醒**：源发票（文件名 + 服务渠道 B7）与所选渠道的派送方式（海派/卡派/UPS派等）识别不一致时，前端黄色告警 + 二次确认、后端写 `warnings[]` 兜底，见已知坑 #110
 
 #### API
 
@@ -1431,6 +1432,21 @@ interface PacificSplitResult {
     - **告警升级**：`NonFbaWarning` 加 `destType`，非 FBA 仓告警文案从「疑似卫星仓/沃尔玛仓等非 FBA 仓」改为「已识别为『{destType}』」（无法识别时「无法识别仓类型，暂按 FBA 填写」）。前端预览表新增「目的地类型」列，非 FBA 类型高亮。
     - **验证**：`KWCJ26100001`/`KWCJ26100002`（`ATL1-WAL`/`MCI1n-WAL` + `323948xWFB`）→ 沃尔玛仓，与正确文件一致；`TRKJ26090124`（`STAR-SBCVDCB3G5W5E`）→ 卫星仓/AWD。
     - 位置：`src/lib/kuajingbao-insurance.ts`（`DEST_TYPE_*`/`detectDestType`/`SoGroup.destType`/`SoAccumulator.destType`/`buildGroup`/`fillTemplate`）、`src/app/api/kuajingbao-insurance/route.ts`（响应加 `destType`）、`src/app/kuajingbao-insurance/page.tsx`（告警文案 + 预览列）
+
+110. **TR转供应商：派送方式选错提醒（海派/卡派/UPS派）** (2026-11-03)
+    - 需求：客户下单是「海派」，但同事下供应商系统时习惯性误选「卡派」渠道导致转换错。要在源发票（文件名 + 服务渠道 B7）与所选渠道的派送方式不一致时弹提示。
+    - **识别规则**（`detectDeliveryMethod`，纯函数无 Node 依赖，客户端/服务端共用）：按优先级 `快递派`（`UPS|DPD|红单|快递`）> `海派`（`海派`）> `卡派`（`卡派|海卡|卡车`）；识别不到返回 `null`。`海卡`（海运+卡车）、`卡车派送`（朗胜 KC 渠道）均归入卡派。
+    - **前端**（入口2「转供应商发票」）：`sourceMethods` = 对每份源文件名 `detectDeliveryMethod` 去重；`channelMethod` = 对所选渠道识别；两者都识别到且不一致 → 渠道下方黄色告警框 + 点「生成供应商发票」时 `window.confirm` 二次确认（软提醒，可继续）。
+    - **后端兜底**（`convertTrToSupplier`）：用文件名 + B7 `top.channel` 识别源派送方式、`channelName` 识别渠道，不一致时写 `result.warnings[]`（覆盖「文件名没带关键字、但发票 B7 有」的情况），结果页按文件展示告警。
+    - **坑**：识别函数不能放 `src/lib/tr-to-supplier.ts`（该文件 import `fs/path/exceljs/jszip`，客户端组件引入会 webpack 报 `Can't resolve 'fs'`），须单独放 `src/lib/delivery-method.ts`。
+    - 位置：`src/lib/delivery-method.ts`（新增）、`src/lib/tr-to-supplier.ts`（import + 写 warnings）、`src/app/tr-to-supplier/page.tsx`（前端告警 + confirm + 结果告警展示）
+
+111. **派送方式选错提醒推广到易通上传入口 + 朗胜/延讯** (2026-11-03)
+    - 延续 #110，把同一提醒机制覆盖到其余三个转换功能：
+    - **易通系统上传入口（入口1，`tr-to-supplier` mode=`ettong`）**：无渠道选择，故做**被动存在式提醒**——对上传文件名 `detectDeliveryMethod` 去重得 `sourceMethods`，只要出现非「卡派」的派送方式（海派/UPS派）即显示黄色提示框「检测到派送方式 X，上传易通下单时勿习惯性误选卡派」。无 confirm/后端 warnings（工具本身不选渠道，提醒对象是同事在易通系统里的人工勾选）。
+    - **朗胜转美线 `/ls-to-supplier`**：有渠道选择，做与入口2 相同的**不匹配提醒**——前端 `sourceMethod`（源文件名）vs `channelMethod`（所选渠道）不一致 → 黄色告警 + `window.confirm`；后端 `convertLsToSupplier` 用文件名 + B7 `top.channel` vs `opts.channelName` 写 `warnings[]` 兜底。渠道清单含 `KC-卡车派送`（卡派）、`KD-快递派送`（快递派），故 `detectDeliveryMethod` 补了 `卡车` 关键词。
+    - **延讯转供应商 `/yx-to-tiantu`**：多文件，前端 `sourceMethods`（所有文件名去重）vs `channelMethod` 不一致 → 告警 + confirm；后端 `convertYxToSupplier` 写 warnings（`convertYxBatch` 自动聚合，单张/批量都覆盖）。
+    - 位置：`src/lib/ettong-to-supplier.ts`（import + `convertLsToSupplier`/`convertYxToSupplier` 写 warnings）、`src/app/tr-to-supplier/page.tsx`（入口1 被动提醒）、`src/app/ls-to-supplier/page.tsx`、`src/app/yx-to-tiantu/page.tsx`（前端告警 + confirm）
 
 ### 待重构项
 

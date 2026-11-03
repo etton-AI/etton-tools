@@ -26,6 +26,7 @@ import JSZip from "jszip";
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
+import { detectDeliveryMethod } from "@/lib/delivery-method";
 
 // ============================================================
 // Types
@@ -961,6 +962,17 @@ export async function convertTrToSupplier(
 
   const baseName = orderNo || path.basename(sourceFileName, path.extname(sourceFileName));
   const fileName = `${sanitizeFileName(baseName)}.xlsx`;
+
+  // 派送方式校验: 源发票(文件名 + 服务渠道 B7) vs 所选渠道, 不一致则提醒(软提醒, 不阻断)
+  const warnings: string[] = [];
+  const sourceMethod = detectDeliveryMethod(sourceFileName, top.channel);
+  const channelMethod = detectDeliveryMethod(channelName);
+  if (sourceMethod && channelMethod && sourceMethod !== channelMethod) {
+    warnings.push(
+      `派送方式不一致：源发票为「${sourceMethod}」（${top.channel || path.basename(sourceFileName, path.extname(sourceFileName))}），所选渠道「${channelName}」为「${channelMethod}」，请核对渠道是否选错`
+    );
+  }
+
   return {
     sourceFile: sourceFileName,
     fileName,
@@ -969,7 +981,7 @@ export async function convertTrToSupplier(
     warehouseCode: top.warehouseCode,
     totalBoxes: top.totalBoxes,
     dataRows: items.length,
-    warnings: [],
+    warnings,
     buffer,
   };
 }

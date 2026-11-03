@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
+import { detectDeliveryMethod } from "@/lib/delivery-method";
 
 // ============================================================
 // Types
@@ -114,6 +115,20 @@ export default function YxToTiantuPage() {
     setChannelOpen(false);
   }, []);
 
+  const sourceMethods = useMemo(() => {
+    const set = new Set<string>();
+    for (const f of files) {
+      const m = detectDeliveryMethod(f.name);
+      if (m) set.add(m);
+    }
+    return Array.from(set);
+  }, [files]);
+
+  const channelMethod = useMemo(() => detectDeliveryMethod(channelName), [channelName]);
+
+  const mismatch =
+    channelMethod !== null && sourceMethods.length > 0 && !sourceMethods.includes(channelMethod);
+
   const convert = useCallback(async () => {
     if (files.length === 0) {
       setError("请先上传延讯易通标准模板");
@@ -126,6 +141,13 @@ export default function YxToTiantuPage() {
     if (!channelName) {
       setError("请选择渠道");
       return;
+    }
+
+    if (mismatch && channelMethod) {
+      const ok = window.confirm(
+        `⚠️ 派送方式可能选错：\n源发票为「${sourceMethods.join("、")}」，所选渠道「${channelName}」为「${channelMethod}」。\n\n客户下单的派送方式与所选渠道不一致，请确认渠道是否选错；确认无误后可继续转换。`
+      );
+      if (!ok) return;
     }
 
     setProcessing(true);
@@ -157,7 +179,7 @@ export default function YxToTiantuPage() {
     } finally {
       setProcessing(false);
     }
-  }, [files, supplier, channelName, customerOrderNo]);
+  }, [files, supplier, channelName, customerOrderNo, mismatch, sourceMethods, channelMethod]);
 
   const addFiles = useCallback((incoming: File[]) => {
     const valid = incoming.filter((f) => isSupported(f.name));
@@ -383,6 +405,18 @@ export default function YxToTiantuPage() {
               </div>
             )}
           </div>
+
+          {mismatch && channelMethod && (
+            <div className="flex items-start gap-3 rounded-lg border border-amber-300 bg-amber-50 p-4">
+              <span className="text-lg leading-none">⚠️</span>
+              <div className="text-sm text-amber-800">
+                <p className="font-medium">派送方式可能选错</p>
+                <p className="mt-0.5">
+                  源发票为「{sourceMethods.join("、")}」，所选渠道「{channelName}」为「{channelMethod}」。请核对渠道是否误选（客户下单海派/UPS派时，勿选卡派渠道）。
+                </p>
+              </div>
+            </div>
+          )}
 
           {/* Convert button */}
           <button

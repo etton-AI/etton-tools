@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
+import { detectDeliveryMethod } from "@/lib/delivery-method";
 
 // ============================================================
 // Types
@@ -127,6 +128,18 @@ function EttongEntry() {
     setResult(null);
   }, []);
 
+  // 派送方式提醒(易通系统上传): 从文件名识别海派/UPS派等, 提示下单时勿误选卡派
+  const sourceMethods = useMemo(() => {
+    const set = new Set<string>();
+    for (const f of files) {
+      const m = detectDeliveryMethod(f.name);
+      if (m) set.add(m);
+    }
+    return Array.from(set);
+  }, [files]);
+
+  const warnMethods = sourceMethods.filter((m) => m !== "卡派");
+
   const convert = useCallback(async () => {
     if (files.length === 0) {
       setError("请先上传 TR 客户发票文件");
@@ -213,6 +226,18 @@ function EttongEntry() {
                   </li>
                 ))}
               </ul>
+            </div>
+          )}
+
+          {warnMethods.length > 0 && (
+            <div className="flex items-start gap-3 rounded-lg border border-amber-300 bg-amber-50 p-4">
+              <span className="text-lg leading-none">⚠️</span>
+              <div className="text-sm text-amber-800">
+                <p className="font-medium">检测到派送方式：{warnMethods.join("、")}</p>
+                <p className="mt-0.5">
+                  上传到易通系统下单时，请勿习惯性误选「卡派」渠道；客户下单为{warnMethods.join("、")}，应按对应派送方式下单。
+                </p>
+              </div>
             </div>
           )}
 
@@ -392,6 +417,21 @@ function SupplierEntry() {
     setResult(null);
   }, []);
 
+  // 派送方式识别(渠道选错提醒): 源发票文件名 vs 所选渠道
+  const sourceMethods = useMemo(() => {
+    const set = new Set<string>();
+    for (const it of fileItems) {
+      const m = detectDeliveryMethod(it.file.name);
+      if (m) set.add(m);
+    }
+    return Array.from(set);
+  }, [fileItems]);
+
+  const channelMethod = useMemo(() => detectDeliveryMethod(channelName), [channelName]);
+
+  const mismatch =
+    channelMethod !== null && sourceMethods.length > 0 && !sourceMethods.includes(channelMethod);
+
   const convert = useCallback(async () => {
     if (fileItems.length === 0) {
       setError("请先上传 TR 客户发票文件");
@@ -404,6 +444,14 @@ function SupplierEntry() {
     if (!channelName) {
       setError("请选择渠道");
       return;
+    }
+
+    // 派送方式不一致时二次确认(软提醒, 可继续)
+    if (mismatch && channelMethod) {
+      const ok = window.confirm(
+        `⚠️ 派送方式可能选错：\n源发票为「${sourceMethods.join("、")}」，所选渠道「${channelName}」为「${channelMethod}」。\n\n客户下单的派送方式与所选渠道不一致，请确认渠道是否选错；确认无误后可继续转换。`
+      );
+      if (!ok) return;
     }
 
     setProcessing(true);
@@ -432,7 +480,7 @@ function SupplierEntry() {
     } finally {
       setProcessing(false);
     }
-  }, [fileItems, supplier, channelName, customsOverride, station]);
+  }, [fileItems, supplier, channelName, customsOverride, station, mismatch, sourceMethods, channelMethod]);
 
   const reset = useCallback(() => {
     setResult(null);
@@ -602,6 +650,21 @@ function SupplierEntry() {
             )}
           </div>
 
+          {mismatch && channelMethod && (
+            <div className="flex items-start gap-3 rounded-lg border border-amber-300 bg-amber-50 p-4">
+              <svg className="mt-0.5 h-5 w-5 shrink-0 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M9.172 16.172a4 4 0 015.656 0 4 4 0 01-5.656 0zM12 3l9 15a1 1 0 01-.86 1.5H3.86A1 1 0 013 18L12 3z" />
+              </svg>
+              <div>
+                <p className="text-sm font-medium text-amber-800">⚠️ 派送方式可能选错，请核对渠道</p>
+                <p className="mt-0.5 text-sm text-amber-700">
+                  源发票为「{sourceMethods.join("、")}」，所选渠道「{channelName}」为「{channelMethod}」。
+                  客户下单的派送方式与所选渠道不一致，请确认是否误选了卡派等不同派送方式。
+                </p>
+              </div>
+            </div>
+          )}
+
           <button
             onClick={convert}
             disabled={processing}
@@ -636,6 +699,20 @@ function SupplierEntry() {
             onReset={reset}
             subtitle={`${result.result.supplier} · 渠道「${result.result.channel}」 · 共 ${result.result.total} 份供应商发票`}
           />
+          {result.result.files.some((f) => f.warnings.length > 0) && (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 p-4">
+              <p className="text-sm font-medium text-amber-800">⚠️ 以下发票存在提醒</p>
+              <ul className="mt-1 space-y-1">
+                {result.result.files
+                  .filter((f) => f.warnings.length > 0)
+                  .map((f, i) => (
+                    <li key={i} className="text-sm text-amber-700">
+                      <span className="font-medium">{f.sourceFile}</span>：{f.warnings.join("；")}
+                    </li>
+                  ))}
+              </ul>
+            </div>
+          )}
           {result.result.files.length > 0 && (
             <div className="rounded-lg border border-zinc-200 bg-white p-4">
               <p className="mb-2 text-sm font-medium text-zinc-700">生成的发票清单</p>
