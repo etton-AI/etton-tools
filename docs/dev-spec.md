@@ -1448,17 +1448,19 @@ interface PacificSplitResult {
     - **延讯转供应商 `/yx-to-tiantu`**：多文件，前端 `sourceMethods`（所有文件名去重）vs `channelMethod` 不一致 → 告警 + confirm；后端 `convertYxToSupplier` 写 warnings（`convertYxBatch` 自动聚合，单张/批量都覆盖）。
     - 位置：`src/lib/ettong-to-supplier.ts`（import + `convertLsToSupplier`/`convertYxToSupplier` 写 warnings）、`src/app/tr-to-supplier/page.tsx`（入口1 被动提醒）、`src/app/ls-to-supplier/page.tsx`、`src/app/yx-to-tiantu/page.tsx`（前端告警 + confirm）
 
-112. **易通系统上传：第 8 行插空行导致 Java NullPointerException** (2026-11-03)
+112. **易通系统上传：第 8 行插空行导致 Java NullPointerException** (2026-11-03, 2026-11-04 补充)
     - 现象：入口1「易通系统上传」生成的文件导入易通系统报 `java.lang.NullPointerException`。
-    - 根因：`buildEttonInvoice` 的 `shiftRowRefsInSheetXml` 把第 8 行及以下行号 +1（原第 8 行移到第 9 行），但**没在第 8 行补空行元素**，导致生成的 sheet1.xml 里 `<row r="7">` 后直接是 `<row r="9">`，第 8 行的 `<row r="8">` 缺失。易通系统（Java/POI）按行号读取第 8 行时 `getRow(7)` 返回 `null`，后续 `.getCell()` 触发 NPE。
-    - 修复：`shiftRowRefsInSheetXml` 下移后，若第 `fromRow` 行缺失且第 `fromRow+1` 行存在，则在第 `fromRow` 行位置补一个空 `<row r="8"/>`（自闭合，无 cell），使行号 1~N 连续无跳号。
-    - 教训：OOXML 允许稀疏行（Excel/WPS 都能打开），但**第三方 Java 解析器可能假设行连续或按行号随机访问**，缺失行会 NPE。插入行位移时务必保留目标行的空 `<row>` 元素。
-    - 位置：`src/lib/tr-to-supplier.ts`（`shiftRowRefsInSheetXml` 第 5 步补空行）
+    - 根因（两处，均会触发 NPE）：
+      1. `shiftRowRefsInSheetXml` 把第 8 行及以下行号 +1（原第 8 行移到第 9 行），但**没在第 8 行补任何 `<row>` 元素**，生成的 sheet1.xml 里 `<row r="7">` 后直接是 `<row r="9">`，第 8 行缺失 → `getRow(7)` 返回 `null` → `.getCell()` NPE。
+      2. 补空行后若只补自闭合 `<row r="8"/>`（无 cell），行号虽连续、`getRow` 不空，但易通系统读该行某列时 `row.getCell(col)` 仍返回 `null` → NPE。
+    - 修复：`shiftRowRefsInSheetXml` 第 5 步补一个**结构完整的空行**——复制下一行（原第 8 行，已下移到第 9 行）的 `<row>` 属性与 A~G 单元格结构，把行号改成 `fromRow`、清空所有值（去 `t="…"` 与 `<v>`/`<is>`/`<f>`），得到 `<row r="8" ht="…" spans="1:7"><c r="A8" s="1"/>…<c r="G8" s="3"/></row>`，与相邻行结构一致。
+    - 教训：OOXML 允许稀疏行，但**第三方 Java 解析器可能按行号随机访问**：缺 `<row>` → `getRow` null；有 `<row>` 但缺 `<c>` → `getCell` null，两者都会 NPE。插入行位移时，目标空行务必补出**与相邻行同结构的空单元格**，而非仅补自闭合空行。
+    - 位置：`src/lib/tr-to-supplier.ts`（`shiftRowRefsInSheetXml` 第 5 步补结构完整空行）
 
-113. **易通系统上传：收件人国家自动转中文** (2026-11-03)
+113. **易通系统上传：收件人国家自动转中文** (2026-11-03, 2026-11-04 修正)
     - 需求：易通系统上传发票的「收件人国家」字段要求中文（如 `US` → `美国`），源 TR 发票 F8 是英文代码，导入时须转中文。
-    - 实现：`buildEttonInvoice` 行位移后，`localizeCountryCell` 定位 F9 单元格（原 F8 下移一行）：若为 `t="s"` 共享字符串，经 `getSharedStringText` 从 `xl/sharedStrings.xml` 读回英文代码（支持富文本 run 拼接），查 `COUNTRY_CN` 映射得中文，改写为 `t="inlineStr"` 内联字符串 `<is><t>美国</t></is>`。
-    - 坑：**只改单元格为 inlineStr、不改 sharedStrings 表**——英文代码可能在表内被他处共享引用，直接改 sharedStrings 会误伤；读回时须按 `<si>` 顺序取第 `index` 个（`<v>` 里的数字是 sharedStrings 下标），不能按值查找。
+    - 实现：`buildEttonInvoice` 行位移后，`localizeCountryCell` 定位 F9 单元格（原 F8 下移一行）：若为 `t="s"` 共享字符串，经 `getSharedStringText` 从 `xl/sharedStrings.xml` 读回英文代码（支持富文本 run 拼接），查 `COUNTRY_CN` 映射得中文；把中文**追加到 sharedStrings 末尾**（新下标 = 现有 `<si>` 数，同步 `uniqueCount` +1），F9 保持 `t="s"`、`<v>` 指向新下标。
+    - 坑（2026-11-04 修正）：**不能把单元格改成 `t="inlineStr"` 内联字符串**——源发票所有中文都在 sharedStrings（`t="s"`），易通系统已验证能读；而 `inlineStr` 是易通解析器不支持的类型，首次引入导致上传报 `NullPointerException`。故改用「追加 sharedStrings + 保持 `t="s"`」，不改动单元格类型。读回时须按 `<si>` 顺序取第 `index` 个（`<v>` 里的数字是 sharedStrings 下标），不能按值查找。
     - 位置：`src/lib/tr-to-supplier.ts`（`COUNTRY_CN`、`getSharedStringText`、`localizeCountryCell`、`buildEttonInvoice` 调用）
 
 ### 待重构项

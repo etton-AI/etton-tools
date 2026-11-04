@@ -1031,10 +1031,26 @@ function shiftRowRefsInSheetXml(xml: string, fromRow: number): string {
     const r2 = parseInt(r2s, 10);
     return `<mergeCell ref="${c1}${r1 >= fromRow ? r1 + 1 : r1}:${c2}${r2 >= fromRow ? r2 + 1 : r2}"`;
   });
-  // 5. 在 fromRow 行补一个空 <row r="fromRow"/>（下移后该行缺失, 易通系统按行号读取时 getRow 返回 null 会 NPE）
+  // 5. 在 fromRow 行补一个「结构完整」的空行(复制下一行结构、清空所有值)。
+  //    只补自闭合 <row r="fromRow"/> 不够: 易通系统按行/列读取时 getRow 返回 null 或
+  //    row.getCell(col) 返回 null 都会 NPE, 故补出与相邻行一致的 A~G 空单元格结构。
   const next = fromRow + 1;
   if (!xml.includes(`<row r="${fromRow}"`) && xml.includes(`<row r="${next}"`)) {
-    xml = xml.replace(`<row r="${next}"`, `<row r="${fromRow}"/><row r="${next}"`);
+    const nextRowRe = new RegExp(`<row r="${next}"([^>]*)>([\\s\\S]*?)<\\/row>`);
+    const nr = nextRowRe.exec(xml);
+    if (nr) {
+      let emptyCells = nr[2]
+        .replace(/<c r="([A-Z]+)\d+"/g, (_m, col) => `<c r="${col}${fromRow}"`)
+        .replace(/ t="[a-zA-Z]+"/g, "")
+        .replace(/<v>[\s\S]*?<\/v>/g, "")
+        .replace(/<is>[\s\S]*?<\/is>/g, "")
+        .replace(/<f>[\s\S]*?<\/f>/g, "");
+      emptyCells = emptyCells.replace(/<c([^>]*)>\s*<\/c>/g, "<c$1/>");
+      const emptyRow = `<row r="${fromRow}"${nr[1]}>${emptyCells}</row>`;
+      xml = xml.replace(`<row r="${next}"`, emptyRow + `<row r="${next}"`);
+    } else {
+      xml = xml.replace(`<row r="${next}"`, `<row r="${fromRow}"/><row r="${next}"`);
+    }
   }
   return xml;
 }
@@ -1082,21 +1098,34 @@ function getSharedStringText(sharedStringsXml: string, index: number): string {
   return "";
 }
 
-/** 把收件人国家单元格(行位移后为 F9, 原 F8)的英文国家代码转为中文内联字符串 */
-function localizeCountryCell(sheetXml: string, sharedStringsXml: string): string {
+/** 把收件人国家单元格(行位移后为 F9, 原 F8)的英文国家代码转为中文共享字符串。
+ *  用共享字符串(t="s")而非内联字符串(inlineStr)——源发票所有中文都在 sharedStrings,
+ *  易通系统已验证能读; 而 inlineStr 是易通解析器可能不支持的类型, 会触发 NPE。 */
+function localizeCountryCell(
+  sheetXml: string,
+  sharedStringsXml: string
+): { sheetXml: string; sharedStringsXml: string } {
   const cellRe = /<c r="F9"([^>]*)>([\s\S]*?)<\/c>/;
   const cellMatch = cellRe.exec(sheetXml);
-  if (!cellMatch) return sheetXml;
+  if (!cellMatch) return { sheetXml, sharedStringsXml };
   const attrs = cellMatch[1];
   const inner = cellMatch[2];
-  if (!/t="s"/.test(attrs)) return sheetXml; // 非共享字符串(已内联), 跳过
+  if (!/t="s"/.test(attrs)) return { sheetXml, sharedStringsXml }; // 非共享字符串, 跳过
   const vMatch = /<v>(\d+)<\/v>/.exec(inner);
-  if (!vMatch) return sheetXml;
+  if (!vMatch) return { sheetXml, sharedStringsXml };
   const code = getSharedStringText(sharedStringsXml, parseInt(vMatch[1], 10)).trim().toUpperCase();
   const cn = COUNTRY_CN[code];
-  if (!cn) return sheetXml;
-  const newCell = `<c r="F9"${attrs.replace(/t="s"/, 't="inlineStr"')}><is><t>${cn}</t></is></c>`;
-  return sheetXml.replace(cellMatch[0], newCell);
+  if (!cn) return { sheetXml, sharedStringsXml };
+
+  // 追加中文到 sharedStrings 末尾, 得到新下标(= 现有 <si> 数量), 保持 uniqueCount 同步
+  const newIndex = (sharedStringsXml.match(/<si>/g) || []).length;
+  const newSharedStrings = sharedStringsXml
+    .replace(/uniqueCount="(\d+)"/, (_m, n) => `uniqueCount="${parseInt(n, 10) + 1}"`)
+    .replace(/<\/sst>/, `<si><t>${cn}</t></si></sst>`);
+
+  // F9 保持 t="s", 仅把 <v> 指向新追加的中文共享字符串
+  const newCell = cellMatch[0].replace(/<v>\d+<\/v>/, `<v>${newIndex}</v>`);
+  return { sheetXml: sheetXml.replace(cellMatch[0], newCell), sharedStringsXml: newSharedStrings };
 }
 
 /** 生成「易通系统上传」发票 = 源发票第 8 行插入空行(保留原格式/图片/合并单元格) + 收件人国家转中文 */
@@ -1118,8 +1147,12 @@ export async function buildEttonInvoice(filePath: string): Promise<Buffer> {
   // 1. 第 8 行插入空行(行号下移)
   let sheetXml = shiftRowRefsInSheetXml(await sheetFile.async("string"), ETON_INSERT_ROW);
   // 2. 收件人国家英文代码转中文(F8 已下移到 F9)
-  sheetXml = localizeCountryCell(sheetXml, sharedStrings);
+  const localized = localizeCountryCell(sheetXml, sharedStrings);
+  sheetXml = localized.sheetXml;
   zip.file(sheetPath, sheetXml);
+  if (localized.sharedStringsXml !== sharedStrings) {
+    zip.file("xl/sharedStrings.xml", localized.sharedStringsXml);
+  }
 
   // 浮动图片锚点同步下移
   const drawingFile = zip.file("xl/drawings/drawing1.xml");
