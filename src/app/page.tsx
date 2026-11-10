@@ -198,6 +198,19 @@ const TOOLS: Tool[] = [
       </svg>
     ),
   },
+  {
+    href: "/sirui-to-supplier",
+    title: "思锐转供应商发票",
+    badge: "高效",
+    desc: "思锐客户下单发票转供应商发票，支持华威尔/美琦/英美/航乐",
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+        <path d="M14 2v6h6" />
+        <path d="m9 15 2 2 4-4" />
+      </svg>
+    ),
+  },
 ];
 
 export default function HomePage() {

@@ -724,6 +724,37 @@ interface PacificSplitResult {
 
 ---
 
+### 3.18 思锐转供应商发票 — `/sirui-to-supplier`
+
+**文件**: `src/app/sirui-to-supplier/page.tsx` + `src/lib/sirui-to-supplier.ts` + `src/app/api/sirui-to-supplier/*`
+
+#### 功能
+
+上传思锐客户「下单发票」，下拉选择要生成的供应商发票，批量转换为供应商下单模板，输出 ZIP。支持 4 家供应商：**华威尔 / 美琦 / 英美 / 航乐**。
+
+#### 核心业务规则（以各供应商答案样本反推）
+
+- **混箱语义**：G 列箱数 `>=1` 开 G 个新箱（单箱数量 = 总数量 ÷ 箱数）；G `=0/空` 表示混箱（共享当前箱，单箱数量 = 总数量）
+- **华威尔 / 航乐（一箱一行 explode）**：每物理箱生成一行，混箱行共享当前箱序号；华威尔箱唛号 = `货箱编号 + U + 两位递增序号`（跨箱累计，混箱共享），航乐 Box No 顺序 1..N
+- **美琦 / 英美（排序号）**：累计区间 `"起-止"`（单箱一个数字），混箱共享当前累计箱号；**美琦序号为字符串、英美单箱/混箱序号为数字**（对齐各自答案样本，见已知坑 #121）
+- **长/宽/高**：美琦 = 源值 − 1（美琦特有）；英美/航乐混箱行尺寸继承当前箱（见已知坑 #120）
+- **报关/清关方式**：有单证→各供应商「单独报关/一般贸易/报关退税」；无单证→「买单报关/代理报关/买单报关/委托报关」；清关方式映射华威尔 D3 / 英美 B18 / 航乐 L7
+- **图片**：华威尔/美琦源用 WPS DISPIMG（按图片 buffer hash 去重注入）、航乐源用浮动图片；英美无图片列
+
+#### 数据来源
+
+- 顶部信息：B9 报关/B10 保险/B11 清关/B12-17 VAT-EORI/B18 总箱数、F14-F22 收件人
+- 明细：R25 起 A-V 列（货箱编号/追踪编码/品名/材质/用途/箱数/总数量/单价/总价/币种/海关编码/品牌/型号/品牌类型/净重/毛重/长宽高/链接/图片）
+
+#### API
+
+- `POST /api/sirui-to-supplier`：formData `file`（可多个）+ `supplier` + `channelName` + `customerOrderNo`（多值）+ `customsOverride` + `station` → `{ sessionId, result }`，`result.files[]` 含 `{ sourceFile, outputFile, customerOrderNo, totalBoxes, dataRows, warnings }`
+- `GET /api/sirui-to-supplier?session=xxx`：下载 ZIP（30 分钟 session 过期）
+- `GET /api/sirui-to-supplier/channels?supplier=xxx`：渠道下拉清单
+- `GET /api/sirui-to-supplier/options?supplier=xxx`：报关方式下拉值域 + 送货货站/交货仓库列表
+
+---
+
 ## 4. 非目标（明确没做的）
 
 - ❌ **用户认证/登录**: LAN 工具，无权限控制
@@ -1536,6 +1567,28 @@ interface PacificSplitResult {
     - 修复：FBA ID 解析由「去末尾 `U\d{6}` 后缀」改为「识别到含 `FBA` 时固定取前 12 位，后面多出的全部丢弃」（`fbaRaw.toUpperCase().includes("FBA") ? fbaRaw.slice(0, 12) : fbaRaw`）。12 位 FBA 码格式 = `FBA` + 9 位字母数字，是本系统 FBA 号统一格式；非 FBA 仓编号（沃尔玛/卫星/海外仓，如 `STAR-...`/`OWS...`/`WFB...`）不含 `FBA`，原样保留不截断。
     - **验证**：对照 `箱货清单-LSGKJ26100069.xlsx` 与 `【正确写法】…_跨境堡投保箱单.xlsx`——FBA ID `FBA19T52RHCZU000001～40；` 经修复后入仓编号 = `FBA19T52RHCZ`，与正确文件一致。
     - 位置：`src/lib/kuajingbao-insurance.ts`（`parseCargoList` 内 FBA ID 提取）
+
+120. **思锐转供应商：合并单元格读回 master 值 + 混箱尺寸继承** (2026-11-10)
+    - 现象一：思锐源用「合并单元格」表达混箱（如华威尔 G26:G27、美琦 P/Q 列纵向合并，主格有值、从属格空），ExcelJS 读从属格 `type=Merge` 且会继承主格值，把混箱误判为「开新箱」，导致华威尔箱唛号序号 `U01→U23` 错为 `U01→U21` 应正确（多开箱）、美琦混箱尺寸/毛重错读。
+    - 修复一：`cellNum()` 特判 `cell.type === ExcelJS.ValueType.Merge` 返回 `0`（从属格视为空）。
+    - 现象二：英美源混箱行尺寸列留空，直接读为 0/0/0；美琦源混箱行尺寸已填，需用自身。
+    - 修复二：`dimOf()` 规则——开新箱记录当前箱尺寸；混箱行源尺寸非空用自身、为空继承当前箱尺寸。
+    - 位置：`src/lib/sirui-to-supplier.ts`（`cellNum` / `dimOf`）
+
+121. **思锐转供应商：英美排序号单箱为数字、美琦为字符串** (2026-11-10)
+    - 现象：美琦答案样本 A 列单箱/混箱排序号是字符串（`"21"`），英美答案样本是数字（`8`/`9`），两供应商约定不同；初版英美也输出字符串导致类型不一致。
+    - 修复：英美 `mapItem` 的 `sortNo` 改为 `number | string`——单箱/混箱输出数字 `start`/`ctx.boxSeq`，区间输出 `` `${start}-${end}` ``；美琦保持字符串不变。
+    - 位置：`src/lib/sirui-to-supplier.ts`（英美 `mapItem` 排序号）
+
+122. **思锐转供应商：航乐材重/CBM 用真实值、答案样本为 1.0 占位** (2026-11-10)
+    - 现象：航乐答案样本 S/T 列（材重/CBM）全为 `1.0`（未填占位），本实现输出真实计算值（材重 = 长×宽×高÷6000，CBM = 长×宽×高÷1e6）。物理上有意义（33×29×31cm 箱 CBM≈0.03m³ 而非 1.0），故保留真实值并在文档注明有意差异。
+    - 另：航乐答案样本最后一行（box 29 混箱 UV67A）尺寸填了 box 28 的 24/21/37，属样本手工错误；本实现按「继承当前箱 box 29 = 24/18/27」输出（更正确）。
+    - 位置：`src/lib/sirui-to-supplier.ts`（航乐 `mapItem` S/T 列）
+
+123. **思锐转供应商：美琦「物品箱号」= 源箱数透传(混箱→0) + 材质列答案样本为模板示例值** (2026-11-10)
+    - 现象一：美琦答案样本 R 列「物品箱号」= 源 G 列箱数原样透传（开新箱 = 箱数、混箱 = 0），初版误把混箱写成 1。修复：`boxCount >= 1 ? Math.round(boxCount) : 0`。
+    - 现象二：美琦答案样本 M 列「材质」全是模板示例值（`铁+ABS塑料材质`/`铁+ABS`），与源真实材质（`不锈钢铝合金`/`铝合金`/`碳纤维`）不对应——作者制作答案时未覆盖材质列。本实现如实透传源材质，与答案的有意差异。
+    - 位置：`src/lib/sirui-to-supplier.ts`（美琦 `mapItem` R/M 列）
 
 ### 待重构项
 
