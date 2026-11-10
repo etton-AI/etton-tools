@@ -1531,6 +1531,12 @@ interface PacificSplitResult {
       4. W 列 `<col min="23" max="23">` 的 width 替换为 25.2090909090909 + customWidth="1"。
     - 位置：`src/lib/sirui-fba-split.ts`（`setCellSharedStr` / `expandSharedFormulas` / `dominantStyle` / `buildOutput` 中 K 列样式与 W 列宽替换）
 
+119. **跨境堡批量投保：FBA ID 取前 12 位，后面多出的箱序/箱数全部丢弃** (2026-11-10)
+    - 现象：货箱清单的 FBA ID 列格式更新了——旧格式是「12 位 FBA 码 + `U`+6 位数字箱序」结尾（如 `FBA19MXX2JCWU260101`），原代码用 `.replace(/U\d{6}$/, "")` 去箱序后缀；新格式在箱序后又追加了 `～箱数；`（如 `FBA19T52RHCZU000001～40；`），`U\d{6}` 不再在字符串末尾，正则失效，导致入仓编号整个原样透传（含 `U000001～40；`），该票入仓编号错误。
+    - 修复：FBA ID 解析由「去末尾 `U\d{6}` 后缀」改为「识别到含 `FBA` 时固定取前 12 位，后面多出的全部丢弃」（`fbaRaw.toUpperCase().includes("FBA") ? fbaRaw.slice(0, 12) : fbaRaw`）。12 位 FBA 码格式 = `FBA` + 9 位字母数字，是本系统 FBA 号统一格式；非 FBA 仓编号（沃尔玛/卫星/海外仓，如 `STAR-...`/`OWS...`/`WFB...`）不含 `FBA`，原样保留不截断。
+    - **验证**：对照 `箱货清单-LSGKJ26100069.xlsx` 与 `【正确写法】…_跨境堡投保箱单.xlsx`——FBA ID `FBA19T52RHCZU000001～40；` 经修复后入仓编号 = `FBA19T52RHCZ`，与正确文件一致。
+    - 位置：`src/lib/kuajingbao-insurance.ts`（`parseCargoList` 内 FBA ID 提取）
+
 ### 待重构项
 
 - [ ] 将 session 存储从内存 Map 改为临时文件或 Redis

@@ -55,7 +55,7 @@ export interface SoGroup {
   country: string;         // 国家 → 目的国
   warehouseCode: string;   // 仓库代码 → 目的地
   destType: string;        // 目的地类型（按入仓编号/仓库代码自动识别，见 detectDestType）
-  fbaList: string[];       // 该票全部 FBA 号（去箱序后缀、去重、保持出现顺序）
+  fbaList: string[];       // 该票全部 FBA 号（含「FBA」时取前 12 位 FBA 码、去重、保持出现顺序）
   fbaBase: string;         // 入仓编号（fbaList 以空格连接，≤350 字符；超出部分见 remark）
   channel: string;         // 客户渠道（判断是否全美锁仓）
   goodsDescription: string;// 货物描述
@@ -392,7 +392,7 @@ interface CargoRow {
   material: string;
   isFragile: boolean;
   rowWeight: number; // 该行公斤数 = 单箱毛重 × 总箱数
-  fbaId: string;     // 该行 FBA 号（去箱序后缀），按材质拆分时随行归到对应子票
+  fbaId: string;     // 该行 FBA 号（含「FBA」时取前 12 位 FBA 码），按材质拆分时随行归到对应子票
 }
 
 /** 解析中间态：一个 SO 的原始行 + 汇总信息 */
@@ -555,8 +555,11 @@ function parseCargoList(ws: ExcelJS.Worksheet): ParseResult {
     const ch = cellText(ws.getCell(r, col.channel));
     if (ch && !acc.channel) acc.channel = ch;
 
-    // 入仓编号：收集该票全部 FBA ID（去箱序后缀 U+6 位数字，去重，保持首次出现顺序）
-    const fbaId = cellText(ws.getCell(r, col.fbaId)).replace(/U\d{6}$/, "").trim();
+    // 入仓编号：收集该票全部 FBA ID（去重，保持首次出现顺序）。
+    // 新版货箱清单的 FBA ID 会在 12 位 FBA 码后追加箱序、箱数等（如 FBA19T52RHCZU000001～40；），
+    // 识别到含「FBA」时固定取前 12 位，后面多出的全部丢弃。
+    const fbaRaw = cellText(ws.getCell(r, col.fbaId)).trim();
+    const fbaId = fbaRaw.toUpperCase().includes("FBA") ? fbaRaw.slice(0, 12) : fbaRaw;
     if (fbaId && !acc.fbaList.includes(fbaId)) {
       acc.fbaList.push(fbaId);
     }
