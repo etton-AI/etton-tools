@@ -74,7 +74,9 @@ ETTON 电商AI/
 │   │       ├── multi-supplier-reconciliation/
 │   │       │   └── route.ts          # POST 双文件上传 + GET 下载（多供应商）
 │   │       ├── pipixiong-split/
-│   │       │   └── route.ts          # POST 上传 + GET 下载 ZIP
+│   │       │   └── route.ts          # POST 上传 + GET 下载（国内/报关/国外/INVOICE 四类）
+│   │       ├── brokers/
+│   │       │   └── route.ts          # GET 列表 + POST 新增报关行
 │   │       └── yanxun-convert/
 │   │           └── route.ts          # POST 批量上传（多文件/ZIP）+ GET 下载（单票/ZIP）
 │   ├── components/
@@ -84,7 +86,8 @@ ETTON 电商AI/
 │       ├── convert-pacific-insurance.ts  # 太平洋转换核心逻辑 (502 行)
 │       ├── reconciliation.ts         # [旧] 单供应商对账逻辑 (272 行)
 │       ├── multi-supplier-reconciliation.ts  # 多供应商对账引擎 (17家供应商配置，~870行)
-│       ├── pipixiong-split.ts        # 皮皮熊拆分核心逻辑 (371 行)
+│       ├── pipixiong-split.ts        # 皮皮熊拆分核心逻辑 (960 行)
+│       ├── pipixiong-brokers.ts      # 报关行存储（data/brokers.json + seed）
 │       └── yanxun-convert.ts         # 延讯下单优化核心逻辑（含 generateYanxunZip）
 ├── 保单拆分功能/                     # 原型/实验脚本（不参与构建）
 │   ├── split_insurance.js            # 原始 Node.js 拆分脚本
@@ -441,41 +444,35 @@ interface PacificSplitResult {
 
 ### 3.11 皮皮熊账单拆分 — `/pipixiong-split`
 
-**文件**: `src/app/pipixiong-split/page.tsx` + `src/lib/pipixiong-split.ts` + `src/app/api/pipixiong-split/route.ts`
+**文件**: `src/app/pipixiong-split/page.tsx` + `src/lib/pipixiong-split.ts` + `src/lib/pipixiong-brokers.ts` + `src/app/api/pipixiong-split/route.ts` + `src/app/api/brokers/route.ts`
 
 #### 功能
 
-1. 上传皮皮熊合并账单 Excel
-2. 自动识别货代识别号、报关单号和各费用列
-3. 按报关单号拆分，每个报关单号生成 3 个账单：
-   - 国内账单（报关费 + 港杂费 + 拖车费）
-   - 国外账单（海运费 + 税金）
-   - INVOICE（总费用明细）
-4. 按货代识别号分目录打包 ZIP 下载
+1. 上传皮皮熊合并账单 Excel，读取全部 **4 个数据 sheet**（第 2/3/4 页为「香港公司支付 USD」明细）
+2. 按「货代对应识别号」拆分，只处理未支付记录，生成 **4 类账单**：
+   - 国内账单（深圳抬头 / RMB，拖车费 + 港杂费）
+   - 报关费账单（深圳抬头 / RMB，客户自行付报关行）
+   - 国外账单（香港抬头 / USD）
+   - INVOICE（香港抬头 / 客户发票）
+3. 上传时**下拉选择已记录的报关行**（内置易豹达、圣塔艾洛斯两家），无则手动新增并保存（持久化），下次出现在下拉框
+4. 前端 4 个下载按钮分别下载四类账单（不打 ZIP）
 
 #### 核心逻辑 (`src/lib/pipixiong-split.ts`)
 
 **导出函数**:
-- `processPipixiongSplit(filePath, fileName)` → `PipixiongSplitResult`
-- `generatePipixiongZip(result)` → `Buffer`
+- `processPipixiongSplit(filePath, fileName, broker?)` → `PipixiongSplitResult`（含 4 个 Buffer）
+- `parseDataSheet(ws)` 解析 sheet 1；`parseUsdSheet(ws, opts)` 泛化解析 sheet 2/3/4
 
-**列检测规则**（关键词模糊匹配）:
-- 货代识别号: "货代" / "识别号" / "zmgs"
-- 报关单号: "报关单号" / "海关编号" / 22位数字检测
-- 报关费: "报关费"
-- 港杂费: "港杂" / "港口费"
-- 拖车费: "拖车" / "内陆费"
-- 海运费+税金: "海运" / "税金" / "关税"
-- 总费用: "总费用" / "合计"
+**关键规则**:
+- 只处理未支付记录；已支付记录仅用于 JOB NO 去重统计
+- JOB NO 去重：同一货代识别号出现 ≥ 2 次时加 `-N` 后缀（按全表顺序）
+- sheet 1 各费用阈值决定生成哪些账单（拖车/港杂 → 国内；报关 → 报关费；海运+税金USD>0 → 国外；USD≠0 → INVOICE）
+- 被合并单元格覆盖判定（见「已知坑」#115），避免纵向合并单元格读回 master 值
+- 时间归一化「年.月」`2026.08` → `2026.8`；USD 明细发货数量读作数字
 
-**输出结构 (ZIP)**:
-```
-货代识别号1/
-├── 国内账单_报关单号.xlsx
-├── 国外账单_报关单号.xlsx
-└── INVOICE_报关单号.xlsx
-...
-```
+**报关行持久化** (`src/lib/pipixiong-brokers.ts`): `data/brokers.json` + seed 兜底
+
+详见 `specs/pipixiong-split.md`
 
 ---
 
@@ -695,6 +692,35 @@ interface PacificSplitResult {
 - `POST /api/tr-to-supplier`：formData `file`（可多个，`formData.getAll("file")`）+ `supplier` + `channelName`（必填）+ `customerOrderNo`（可选）→ `{ sessionId, result }`，`result` 含 `{ zipFileName, supplier, channel, total, files[], downloadUrl }`
 - `GET /api/tr-to-supplier?session=xxx`：下载 ZIP（30 分钟 session 过期）
 - `GET /api/tr-to-supplier/channels?supplier=xxx`：返回 `{ supplier, channels[] }` 供前端渠道下拉（从模板读取，服务端内存缓存）
+
+### 3.17 思锐FBA下单发票拆分 — `/sirui-fba-split`
+
+**文件**: `src/app/sirui-fba-split/page.tsx` + `src/lib/sirui-fba-split.ts` + `src/app/api/sirui-fba-split/route.ts`
+
+#### 功能
+
+上传一张思锐「下单发票」+ 一份「内部报价表」，按内部报价里 FBA 码对应的「仓点 / 渠道」，把一张下单发票按 FBA 码拆分为多张发票（每个 FBA 仓一张），输出为 ZIP（15 张左右）。文件名 = `{FBA}-{仓点}.xlsx`。
+
+#### 核心业务规则（以参考文件「拆分的发票」反推）
+
+- 只保留该 FBA 码对应的明细行，并把行号从 R25 重新连续编号
+- F9 收件人国家：`USA`/`US` → `美国`
+- F10 亚马逊仓库代码：填「仓点」（如 `FAT2`）
+- B21 备注：填「渠道」（如 `OA-拆送（OA联盟）`）
+- K 列申报币种：`美元` → `USD`（其余币种按 `CURRENCY_TO_ISO` 映射）
+- 每行 W 列填 `{FBA}-{仓点}`（无表头）
+- 删除「服务渠道」「FBA地址」两个 sheet，输出只保留 1 个 sheet
+- 保留 WPS DISPIMG 产品图片（`xl/cellimages.xml` + `xl/media/`）
+
+#### 数据来源
+
+- 内部报价表：`内部` sheet，D 列 FBA 码（`/^FBA[0-9A-Z]{6,}$/i`）、C 列仓点、H 列渠道
+- 下单发票：F9=国家、R25 起明细行（A 列货箱编号、K 列币种），FBA 码用前缀匹配
+
+#### API
+
+- `POST /api/sirui-fba-split`：formData `quote`（内部报价表）+ `file`（下单发票）→ `{ sessionId, result }`，`result` 含 `{ zipFileName, total, files[], warnings[], downloadUrl }`
+- `GET /api/sirui-fba-split?session=xxx`：下载 ZIP（30 分钟 session 过期）
 
 ---
 
@@ -1462,6 +1488,48 @@ interface PacificSplitResult {
     - 实现：`buildEttonInvoice` 行位移后，`localizeCountryCell` 定位 F9 单元格（原 F8 下移一行）：若为 `t="s"` 共享字符串，经 `getSharedStringText` 从 `xl/sharedStrings.xml` 读回英文代码（支持富文本 run 拼接），查 `COUNTRY_CN` 映射得中文；把中文**追加到 sharedStrings 末尾**（新下标 = 现有 `<si>` 数，同步 `uniqueCount` +1），F9 保持 `t="s"`、`<v>` 指向新下标。
     - 坑（2026-11-04 修正）：**不能把单元格改成 `t="inlineStr"` 内联字符串**——源发票所有中文都在 sharedStrings（`t="s"`），易通系统已验证能读；而 `inlineStr` 是易通解析器不支持的类型，首次引入导致上传报 `NullPointerException`。故改用「追加 sharedStrings + 保持 `t="s"`」，不改动单元格类型。读回时须按 `<si>` 顺序取第 `index` 个（`<v>` 里的数字是 sharedStrings 下标），不能按值查找。
     - 位置：`src/lib/tr-to-supplier.ts`（`COUNTRY_CN`、`getSharedStringText`、`localizeCountryCell`、`buildEttonInvoice` 调用）
+
+114. **思锐FBA拆分：DISPIMG 产品图片去重 + y 偏移重映射** (2026-11-09)
+    - 背景：源下单发票 57 个明细行只有 50 张唯一图片（同一产品多箱/跨 FBA 组共用同一张 DISPIMG，如 `ID_51E9F883` 同时被 LRKT9 行 53-56 与 HIA1 行 57-61 引用）。拆分时每个 FBA 组的 `cellimages.xml` 若按「行」逐行复制，会把共用图片复制成多份 `<xdr:pic name="同一ID">`，导致同 ID 出现多条、图片数多于参考文件（LRKT9/HIA1 均应为 5 张，错产出 8 张）。
+    - 修复：拆分前先扫全表建立 `imageAnchorRow`（图片 ID → 全表首次出现行），每组按图片 ID **去重只保留首次出现**的那条 `<xdr:pic>`；再按锚点行重映射 y 偏移 `newY = offY + (targetNewRow - anchorRow) * ROW_EMU`。锚点行在本组内 → 映射到其新行；跨组借图（锚点行在别的 FBA 组）→ 锚到本组首次引用该图的行。
+    - 与参考文件的**有意差异**：参考文件不改图片 y 偏移（拆出后图片仍「浮」在原绝对位置，行重编号后图片不再对位）；本实现按整行偏移重映射 y（数据行统一 44pt = 558800 EMU），使图片仍对位到新行。图片「计数」与参考完全一致，仅 y 偏移更正确。
+    - 位置：`src/lib/sirui-fba-split.ts`（`buildOutput` 的 `imageAnchorRow` / `seenImg` 去重 / `newY` 重映射）
+
+115. **皮皮熊拆分：被合并单元格覆盖读回 master 值** (2026-11-09)
+    - 现象：源文件 sheet 1 存在纵向合并单元格（如 `P73:P74` 海运列、`S73:S74` 是否支付列、`K73:K74` 报关单号列），ExcelJS 对「被合并覆盖」的单元格（非 master）读 `.value` 会返回 master 的值，导致把上一行的金额误算到下一行（曾把 seq 66 `ZMGS26060002` 误判为 ocean=-100 而多出一组）。
+    - 修复：`isCoveredMergedCell(cell)` 判定 `cell.isMerged && cell.master.address !== cell.address`，`cellStr` / `cellNum` 对覆盖单元格一律返回 `""` / `0`。
+    - 位置：`src/lib/pipixiong-split.ts`（`isCoveredMergedCell` / `cellStr` / `cellNum`）
+
+116. **皮皮熊拆分：USD 明细时间「年.月」归一化** (2026-11-09)
+    - 现象：sheet 1 时间存 `2026.8`（float），sheet 4 时间存 `2026.08`（float，月份带前导零），直接 `String()` 会产出 `"2026.08"`，与参考文件 `"2026.8"` 不一致。
+    - 修复：`fmtTime()` 用正则 `/^(\d{4})\.(\d{1,2})$/` 匹配后 `${年}.${Number(月)}` 去掉月份前导零；USD 明细「发货数量」改为 `cellNum` 读数字（int），与参考一致。
+    - 位置：`src/lib/pipixiong-split.ts`（`fmtTime` / `parseUsdSheet`）
+
+117. **皮皮熊拆分：字体 charset / 默认字体 / 列宽 / 页面设置与参考精确对齐** (2026-11-09)
+    - 现象：与参考文件做 openpyxl 全量对比后，内容值/字体/边框/填充已零差异，但仍有 4 处「看不见」的系统性差异：
+      1. ExcelJS 写入字体不带 `charset`，参考全部中英文字体 `charset="134"`（GB2312）；
+      2. 工作簿默认字体 ExcelJS 硬编码 Calibri 11（`styles-xform.js`，无公开 API），参考默认字体为 宋体 11 `charset=134`；
+      3. 列宽我写 2 位小数（9.53），参考为 4 位小数（9.5278）——openpyxl 读回 round 后不一致；
+      4. `pageSetup` ExcelJS 默认写入 `fitToWidth="1"`、`scale="100"`、`horizontalDpi/verticalDpi="4294967295"`，参考的 `<pageSetup>` 只有 `paperSize="1" fitToHeight="0" orientation="…"`。
+    - 修复：
+      1. 5 个字体工厂统一加 `charset: 134`；
+      2. `applyChineseDefaultFont(buffer)` 用 JSZip 对 `xl/styles.xml` 首个 `<font>`（默认字体）做字符串手术，替换为 `<font><sz val="11"/><color theme="1"/><name val="宋体"/><charset val="134"/><scheme val="minor"/></font>`，四个输出 buffer 统一应用；
+      3. 4 组列宽换成参考的 4 位小数值；
+      4. `pageSetup(orientation)` 工厂显式把 `horizontalDpi/verticalDpi/scale/fitToWidth` 置 `undefined` 以省略，并设 `paperSize: 1`（Letter），与参考 `<pageSetup>` 一致。
+    - 位置：`src/lib/pipixiong-split.ts`（`fontDengXian/fontYaHei/fontArial/fontSong/fontTimesNR` / `applyChineseDefaultFont` / `pageSetup` / 各 builder 列宽数组）
+
+118. **思锐FBA拆分：JSZip 字符串手术的单元格样式 / 共享公式 / 币种样式 / 列宽对齐** (2026-11-09)
+    - 现象：对参考文件做 openpyxl「展开后视觉样式」全量对比（值/字体/填充/边框/对齐/数字格式/行高/列宽/合并/图片计数）时，又揪出 4 处差异：
+      1. `setCellSharedStr` 原用 `new RegExp(`<c r="${ref}"([^>]*?)(\\/>|[\\s\\S]*?<\\/c>)`)`，`([^>]*?)` 非贪婪先匹配空串，导致 `[\\s\\S]*?<\\/c>` 吞掉 `s` 样式属性甚至后续单元格（F10 自闭合吞掉 G10-V10 + 下一行 A11；B21 吞掉 C21/D21/E21）。症状：A11/E21 值丢失、F9/F10/B21/K/W 字体样式丢失、r11 行高丢失；
+      2. 跨组 DISPIMG 图片的共享公式 master（`<f t="shared" ref="V53:V57" si="0">`）在 LRKT9 组被丢弃，HIA1 的 V25 只剩 `=`；
+      3. K 列币种源文件 s=102（无填充 34 行）/ s=104（theme6 黄色 23 行）混用，参考统一为无填充；
+      4. W 列宽源文件 width=11，参考 width=25.2090909090909 + customWidth="1"。
+    - 修复：
+      1. `setCellSharedStr` 拆成「自闭合」+「成对」两个正则分别匹配，`build()` 保留原 `s` 属性，`forceStyle` 时先去掉再追加，最后 `trim()` 补空格，杜绝 `<c r="F9"s="73"` 与 `s="102" s="102"` 重复属性；
+      2. 新增 `expandSharedFormulas(rowXml)`：master 去 `t="shared"` 变独立 `<f>TEXT</f>`，member 从 `<v>` 缓存重建 `<f>_xlfn.DISPIMG(...)</f>`；
+      3. 新增 `dominantStyle(sheet1Xml, col)` 统计该列数据行出现最多的 `s` 值，K 列强制用主样式（无填充）；
+      4. W 列 `<col min="23" max="23">` 的 width 替换为 25.2090909090909 + customWidth="1"。
+    - 位置：`src/lib/sirui-fba-split.ts`（`setCellSharedStr` / `expandSharedFormulas` / `dominantStyle` / `buildOutput` 中 K 列样式与 W 列宽替换）
 
 ### 待重构项
 

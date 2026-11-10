@@ -1,10 +1,10 @@
 /**
  * POST /api/pipixiong-split — 上传皮皮熊账单，返回拆分结果摘要
- * GET  /api/pipixiong-split?session=xxx&type=domestic|international|invoice — 下载对应账单
+ * GET  /api/pipixiong-split?session=xxx&type=domestic|customs|international|invoice — 下载对应账单
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { processPipixiongSplit, type PipixiongSplitResult } from "@/lib/pipixiong-split";
+import { processPipixiongSplit, type PipixiongSplitResult, type BrokerInput } from "@/lib/pipixiong-split";
 import { tmpdir } from "os";
 import { join } from "path";
 import { writeFileSync, unlinkSync } from "fs";
@@ -42,7 +42,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "只支持 .xlsx 或 .xls 格式的文件" }, { status: 400 });
     }
 
-    console.log(`📖 Pipi split: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`);
+    // 报关行（可选）：用户上传时下拉选择/新增的报关行信息
+    let broker: BrokerInput | undefined;
+    const brokerName = formData.get("brokerName");
+    const brokerBankInfo = formData.get("brokerBankInfo");
+    if (brokerName && brokerBankInfo) {
+      broker = { name: brokerName.toString(), bankInfo: brokerBankInfo.toString() };
+    }
+
+    console.log(`📖 Pipi split: ${file.name} (${(file.size / 1024).toFixed(1)} KB)${broker ? ` 报关行=${broker.name}` : ""}`);
 
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
@@ -51,7 +59,7 @@ export async function POST(request: NextRequest) {
 
     let result: PipixiongSplitResult;
     try {
-      result = await processPipixiongSplit(tmpPath, file.name);
+      result = await processPipixiongSplit(tmpPath, file.name, broker);
     } finally {
       try { unlinkSync(tmpPath); } catch {}
     }
@@ -60,17 +68,20 @@ export async function POST(request: NextRequest) {
     store.set(sessionId, { result, fileName: file.name, createdAt: Date.now() });
 
     const domesticCount = result.groups.filter(g => g.hasDomestic).length;
+    const customsCount = result.groups.filter(g => g.hasCustoms).length;
     const intlCount = result.groups.filter(g => g.hasInternational).length;
+    const invoiceCount = result.groups.filter(g => g.hasInvoice).length;
 
-    console.log(`✅ Pipi split: ${result.groups.length} groups → 国内${domesticCount} / 国外${intlCount} / INVOICE${intlCount}`);
+    console.log(`✅ Pipi split: ${result.groups.length} groups → 国内${domesticCount} / 报关${customsCount} / 国外${intlCount} / INVOICE${invoiceCount}`);
 
     return NextResponse.json({
       sessionId,
       sourceFile: result.sourceFile,
       totalGroups: result.groups.length,
       domesticCount,
+      customsCount,
       internationalCount: intlCount,
-      invoiceCount: intlCount,
+      invoiceCount,
       groups: result.groups.map((g) => ({
         seq: g.seq,
         forwarderId: g.forwarderId,
@@ -82,10 +93,13 @@ export async function POST(request: NextRequest) {
         portFee: g.bill.portFee,
         oceanTaxUSD: g.bill.oceanTaxUSD,
         hasDomestic: g.hasDomestic,
+        hasCustoms: g.hasCustoms,
         hasInternational: g.hasInternational,
+        hasInvoice: g.hasInvoice,
       })),
       downloadUrls: {
         domestic: `/api/pipixiong-split?session=${sessionId}&type=domestic`,
+        customs: `/api/pipixiong-split?session=${sessionId}&type=customs`,
         international: `/api/pipixiong-split?session=${sessionId}&type=international`,
         invoice: `/api/pipixiong-split?session=${sessionId}&type=invoice`,
       },
@@ -119,6 +133,10 @@ export async function GET(request: NextRequest) {
   let typeLabel: string;
 
   switch (type) {
+    case "customs":
+      buffer = entry.result.customsBuffer;
+      typeLabel = "报关费";
+      break;
     case "international":
       buffer = entry.result.internationalBuffer;
       typeLabel = "国外账单";
