@@ -184,6 +184,20 @@ const TOOLS: Tool[] = [
       </svg>
     ),
   },
+  {
+    href: "/sirui-fba-split",
+    title: "思锐FBA下单发票拆分",
+    badge: "高效",
+    desc: "按内部报价的 FBA 仓点与渠道，将一张下单发票拆分为多张",
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M8 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
+        <path d="M16 3h4v4" />
+        <path d="M2 12h20" />
+        <path d="M12 12v9" />
+      </svg>
+    ),
+  },
 ];
 
 export default function HomePage() {
@@ -205,7 +219,7 @@ export default function HomePage() {
         </h1>
         <div className="scanline" />
         <p className="mt-6 text-[17px] tracking-[.5px] text-muted">
-          十二款电商效率工具，把繁琐的表格处理变成一次点击。
+          十三款电商效率工具，把繁琐的表格处理变成一次点击。
         </p>
       </section>
 
