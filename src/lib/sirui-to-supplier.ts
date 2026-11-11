@@ -152,6 +152,14 @@ function sanitizeFileName(name: string): string {
   return cleaned || "未命名";
 }
 
+/** YYYY-MM-DD → Excel 日期序列(1900 系统, 序列 1 = 1899-12-31)。用于美琦「预计提货时间」F2 */
+function excelDateSerial(dateStr: string): number {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec((dateStr || "").trim());
+  if (!m) return NaN;
+  const ms = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return Math.round((ms - Date.UTC(1899, 11, 30)) / 86400000);
+}
+
 /** 提取 DISPIMG 单元格里的图片 ID(如 ID_xxx)，非 DISPIMG 返回空串 */
 function dispimgIdFromCell(cell: ExcelJS.Cell): string {
   const v = cell.value;
@@ -434,6 +442,7 @@ interface SupplierSpec {
       channelName: string;
       customsOverride?: string;
       station?: string;
+      pickupDate?: string; // 预计提货时间 YYYY-MM-DD(美琦 F2)
     },
     items: SiruiItem[]
   ) => void;
@@ -481,13 +490,6 @@ function huaweiClearance(clearance: string): string {
   const c = (clearance || "").trim();
   if (c === "自税" || c === "不包税" || c === "不包税递延") return "不包税";
   return "包税"; // 包税 / 空 → 包税
-}
-
-/** 清关方式 → 英美 B18(包税→否, 其余→是) */
-function yingmeiClearance(clearance: string): string {
-  const c = (clearance || "").trim();
-  if (c === "包税") return "否";
-  return "是";
 }
 
 /** 清关方式 → 航乐 L7(自税→不包税递延, 不包税→不包税, 包税→包税) */
@@ -591,6 +593,10 @@ const SUPPLIERS: Record<SiruiSupplierKey, SupplierSpec> = {
       const d = (r: number, v: string | number) => {
         if (v !== "" && v !== null && v !== undefined) ws.getCell(r, 4).value = v;
       };
+      // 清除模板残留示例值(答案样本该列为空): C9 交货客户代号示例 / D9 走货线路示例 / C12 备注标签
+      ws.getCell(9, 3).value = null;   // C9 "HJYT260821326"
+      ws.getCell(9, 4).value = null;   // D9 "卡派"
+      ws.getCell(12, 3).value = null;  // C12 "备注"
       b(1, opts.customerOrderNo);            // 客户原单号
       b(2, opts.station || "福永仓");        // 交货仓库
       d(2, top.insurance || "否");           // 是否购买保险
@@ -697,6 +703,7 @@ const SUPPLIERS: Record<SiruiSupplierKey, SupplierSpec> = {
       b(16, opts.customsOverride || customsFor("美琦", top.customs)); // 报关方式
       b(17, top.totalBoxes);        // 箱数
       set("F1", opts.station || "中山仓"); // 预计交货站点
+      if (opts.pickupDate) set("F2", excelDateSerial(opts.pickupDate)); // 预计提货时间
       set("F3", "自送货");          // 提货方式
     },
     mapItem(item, top, ctx) {
@@ -750,10 +757,10 @@ const SUPPLIERS: Record<SiruiSupplierKey, SupplierSpec> = {
       };
       b(1, opts.channelName);       // 服务
       ws.getCell(14, 2).value = opts.customerOrderNo || null; // 客户订单号(清空示例)
-      b(15, top.hasBattery || "否"); // 带电
+      b(15, "否"); // 带电(默认否, 源发票该字段可能不准确需人工确认)
       b(16, top.hasMagnet || "否");  // 带磁
       b(17, opts.customsOverride || customsFor("英美", top.customs)); // 报关方式
-      b(18, yingmeiClearance(top.clearance)); // 清关方式
+      b(18, "否"); // 清关方式(默认否)
       b(19, top.vatNo);             // VAT号
       b(20, top.eoriNo);            // EORI
       b(21, top.currency);          // 币种
@@ -815,10 +822,10 @@ const SUPPLIERS: Record<SiruiSupplierKey, SupplierSpec> = {
           };
           b(1, opts.channelName);
           ws.getCell(14, 2).value = opts.customerOrderNo || null;
-          b(15, top.hasBattery || "否");
+          b(15, "否"); // 带电(默认否)
           b(16, top.hasMagnet || "否");
           b(17, opts.customsOverride || customsFor("英美", top.customs));
-          b(18, yingmeiClearance(top.clearance));
+          b(18, "否"); // 清关方式(默认否)
           b(19, top.vatNo);
           b(20, top.currency);      // 美线无 EORI, R20 即币种
           b(21, opts.station || "");
@@ -1196,7 +1203,8 @@ export async function convertSiruiToSupplier(
   customerOrderNo: string,
   channelName: string,
   customsOverride?: string,
-  station?: string
+  station?: string,
+  pickupDate?: string
 ): Promise<SiruiConvertResult> {
   const baseSpec = SUPPLIERS[supplier];
   if (!baseSpec) throw new Error(`未知供应商: ${supplier}`);
@@ -1255,7 +1263,7 @@ export async function convertSiruiToSupplier(
   if (!outSheet) throw new Error(`模板中找不到「${spec.sheetName || "(首个)"}」工作表`);
 
   // ── 3. 填充订单头 ──
-  spec.fillHeader(outSheet, top, { customerOrderNo: orderNo, channelName, customsOverride, station }, items);
+  spec.fillHeader(outSheet, top, { customerOrderNo: orderNo, channelName, customsOverride, station, pickupDate }, items);
 
   // ── 4. 展开明细行(explode/排序号) ──
   const ctx: MapCtx = { boxSeq: 0, curDim: { l: 0, w: 0, h: 0 } };

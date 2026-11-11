@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 
 // ============================================================
 // Types
@@ -108,6 +108,7 @@ export default function SiruiToSupplierPage() {
   const [stations, setStations] = useState<string[]>([]);
   const [customsOverride, setCustomsOverride] = useState(""); // "" = 自动按发票判断
   const [station, setStation] = useState(""); // "" = 模板默认
+  const [pickupDate, setPickupDate] = useState(""); // 预计提货时间(美琦 F2)
   const [result, setResult] = useState<ConvertResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -234,6 +235,7 @@ export default function SiruiToSupplierPage() {
       formData.append("channelName", channelName);
       if (customsOverride) formData.append("customsOverride", customsOverride);
       if (station) formData.append("station", station);
+      if (pickupDate) formData.append("pickupDate", pickupDate);
 
       const res = await fetch("/api/sirui-to-supplier", { method: "POST", body: formData });
       const data: ConvertResponse = await res.json();
@@ -247,7 +249,7 @@ export default function SiruiToSupplierPage() {
     } finally {
       setProcessing(false);
     }
-  }, [fileItems, supplier, channelName, customsOverride, station]);
+  }, [fileItems, supplier, channelName, customsOverride, station, pickupDate]);
 
   const reset = useCallback(() => {
     setResult(null);
@@ -257,6 +259,7 @@ export default function SiruiToSupplierPage() {
     setChannelName("");
     setCustomsOverride("");
     setStation("");
+    setPickupDate("");
   }, []);
 
   const onDragOver = (e: React.DragEvent) => {
@@ -279,6 +282,19 @@ export default function SiruiToSupplierPage() {
 
   const channelQuery = channelName.trim().toLowerCase();
   const filteredChannels = channels.filter((c) => c.toLowerCase().includes(channelQuery));
+
+  // 预计提货时间下拉(美琦): 今天起未来 30 天
+  const pickupDates = useMemo(() => {
+    const dates: { value: string; label: string }[] = [];
+    const today = new Date();
+    for (let i = 0; i <= 30; i++) {
+      const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() + i);
+      const value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      const suffix = i === 0 ? "（今天）" : i === 1 ? "（明天）" : "";
+      dates.push({ value, label: `${d.getMonth() + 1}月${d.getDate()}日${suffix}` });
+    }
+    return dates;
+  }, []);
 
   return (
     <div className="space-y-8">
@@ -420,6 +436,23 @@ export default function SiruiToSupplierPage() {
                   <option value="">自动（模板默认）</option>
                   {stations.map((s) => (
                     <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+            {supplier === "美琦" && (
+              <div>
+                <label className="mb-1.5 block text-sm font-medium text-zinc-700">
+                  预计提货时间
+                </label>
+                <select
+                  value={pickupDate}
+                  onChange={(e) => setPickupDate(e.target.value)}
+                  className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+                >
+                  <option value="">自动（模板默认）</option>
+                  {pickupDates.map((d) => (
+                    <option key={d.value} value={d.value}>{d.label}</option>
                   ))}
                 </select>
               </div>

@@ -81,6 +81,7 @@ export async function POST(request: NextRequest) {
     const customerOrderNos = formData.getAll("customerOrderNo").map((v) => String(v).trim());
     const customsOverride = ((formData.get("customsOverride") as string) || "").trim();
     const station = ((formData.get("station") as string) || "").trim();
+    const pickupDate = ((formData.get("pickupDate") as string) || "").trim(); // 预计提货时间(美琦 F2)
 
     if (rawFiles.length === 0) {
       return NextResponse.json({ error: "请上传至少一份思锐客户下单发票（.xlsx）" }, { status: 400 });
@@ -121,7 +122,8 @@ export async function POST(request: NextRequest) {
         customerOrderNo,
         channelName,
         customsOverride || undefined,
-        station || undefined
+        station || undefined,
+        pickupDate || undefined
       );
       const name = uniqueName(result.fileName, outputNames);
       zip.file(name, result.buffer);
