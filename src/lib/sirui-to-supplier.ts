@@ -438,6 +438,7 @@ interface SupplierSpec {
     items: SiruiItem[]
   ) => void;
   mapItem: (item: SiruiItem, top: SiruiTopInfo, ctx: MapCtx) => CellValue[][];
+  styleDataRow?: (row: ExcelJS.Row, maxCol: number) => void; // 数据行逐列样式(模板数据区无格式时补全)
   countryVariants?: {
     match: (country: string) => boolean;
     templateFile: string;
@@ -526,6 +527,8 @@ function dimOf(item: SiruiItem, ctx: MapCtx): { l: number; w: number; h: number 
  * 注意：空值也要显式写 null，否则 VLOOKUP 公式不会被清除。
  */
 function fillYingmeiAddress(ws: ExcelJS.Worksheet, top: SiruiTopInfo): void {
+  // 清掉模板 K 列(带电/带磁/报关/清关)残留示例值, 答案样本该列为空
+  for (const r of [15, 16, 17, 18]) ws.getCell(r, 11).value = null;
   const state = top.recipientState || extractState(top.recipientAddress);
   const setB = (r: number, v: string | number | null) => {
     ws.getCell(r, 2).value = v == null || v === "" ? null : v;
@@ -543,6 +546,32 @@ function fillYingmeiAddress(ws: ExcelJS.Worksheet, top: SiruiTopInfo): void {
   setB(12, phoneFirstLine(top.recipientPhone)); // 电话
   setB(13, top.recipientEmail);               // 邮箱
 }
+
+// 华威尔数据区逐列样式(与答案样本一致: 微软雅黑11/16 + Arial18, 中间列居中, V列无边框带换行)
+const HUAWEI_COL_STYLES: { font: string; size: number; horiz: "left" | "center"; numFmt: string; border: boolean }[] = [
+  { font: "微软雅黑", size: 11, horiz: "left",   numFmt: "@",       border: true },   // A 箱唛号
+  { font: "微软雅黑", size: 16, horiz: "center", numFmt: "General", border: true },   // B Reference ID
+  { font: "微软雅黑", size: 16, horiz: "center", numFmt: "General", border: true },   // C 中文品名
+  { font: "微软雅黑", size: 16, horiz: "center", numFmt: "General", border: true },   // D 英文品名
+  { font: "微软雅黑", size: 16, horiz: "center", numFmt: "General", border: true },   // E 材质
+  { font: "微软雅黑", size: 16, horiz: "center", numFmt: "General", border: true },   // F 用途
+  { font: "微软雅黑", size: 11, horiz: "left",   numFmt: "General", border: true },   // G 海关编码
+  { font: "微软雅黑", size: 11, horiz: "left",   numFmt: "@",       border: true },   // H 产品类型
+  { font: "微软雅黑", size: 16, horiz: "center", numFmt: "General", border: true },   // I 单箱产品数量
+  { font: "Arial",   size: 18, horiz: "center", numFmt: "0_",      border: true },   // J 箱数
+  { font: "微软雅黑", size: 11, horiz: "left",   numFmt: "General", border: true },   // K 币种
+  { font: "微软雅黑", size: 11, horiz: "left",   numFmt: "General", border: true },   // L 单个产品申报单价
+  { font: "微软雅黑", size: 11, horiz: "left",   numFmt: "General", border: true },   // M 单个产品净重
+  { font: "微软雅黑", size: 11, horiz: "left",   numFmt: "General", border: true },   // N 产品图片
+  { font: "微软雅黑", size: 11, horiz: "left",   numFmt: "@",       border: true },   // O 品牌
+  { font: "微软雅黑", size: 11, horiz: "left",   numFmt: "@",       border: true },   // P 品牌类型
+  { font: "微软雅黑", size: 11, horiz: "left",   numFmt: "@",       border: true },   // Q 型号
+  { font: "微软雅黑", size: 11, horiz: "left",   numFmt: "General", border: true },   // R 销售链接
+  { font: "微软雅黑", size: 11, horiz: "left",   numFmt: "@",       border: true },   // S 备注
+  { font: "微软雅黑", size: 11, horiz: "left",   numFmt: "General", border: true },   // T 总产品数量
+  { font: "微软雅黑", size: 11, horiz: "left",   numFmt: "General", border: true },   // U 总申报金额
+  { font: "微软雅黑", size: 11, horiz: "left",   numFmt: "General", border: false },  // V 毛重(无边框)
+];
 
 const SUPPLIERS: Record<SiruiSupplierKey, SupplierSpec> = {
   // ── 华威尔(一箱一行 explode) ─────────────────────────────
@@ -615,6 +644,22 @@ const SUPPLIERS: Record<SiruiSupplierKey, SupplierSpec> = {
         ]);
       }
       return rows;
+    },
+    styleDataRow(row, maxCol) {
+      for (let c = 1; c <= maxCol; c++) {
+        const st = HUAWEI_COL_STYLES[c - 1];
+        if (!st) continue;
+        const cell = row.getCell(c);
+        // 整体替换 style 以打断 ExcelJS 从模板读入的共享 style 引用(逐个赋值会串列)
+        cell.style = {
+          font: { name: st.font, size: st.size, bold: false },
+          alignment: { horizontal: st.horiz, vertical: "middle", wrapText: !st.border },
+          numFmt: st.numFmt,
+          border: st.border
+            ? { top: { style: "thin" }, left: { style: "thin" }, bottom: { style: "thin" }, right: { style: "thin" } }
+            : {},
+        };
+      }
     },
   },
 
@@ -1094,6 +1139,25 @@ async function injectDispimg(
   return Buffer.isBuffer(out) ? out : Buffer.from(out);
 }
 
+/**
+ * ExcelJS writeBuffer 会把模板默认字体(宋体 charset=134)丢失成 Calibri。
+ * 从模板 styles.xml 提取首个 <font>(默认字体), 替换输出 styles.xml 的首个 <font>。
+ */
+async function applyTemplateDefaultFont(buffer: Buffer, tplPath: string): Promise<Buffer> {
+  const tplBuf = await fs.promises.readFile(tplPath);
+  const tplZip = await JSZip.loadAsync(tplBuf);
+  const tplStyles = await tplZip.file("xl/styles.xml")?.async("string");
+  const tplFont = tplStyles?.match(/<font>[\s\S]*?<\/font>/)?.[0];
+  if (!tplFont) return buffer;
+
+  const zip = await JSZip.loadAsync(buffer);
+  const styles = await zip.file("xl/styles.xml")?.async("string");
+  if (!styles) return buffer;
+  const replaced = styles.replace(/<font>[\s\S]*?<\/font>/, tplFont);
+  zip.file("xl/styles.xml", replaced);
+  return Buffer.from(await zip.generateAsync({ type: "nodebuffer" }));
+}
+
 // ============================================================
 // 数据区覆盖式填充辅助
 // ============================================================
@@ -1203,7 +1267,8 @@ export async function convertSiruiToSupplier(
   }
 
   const dataStart = spec.headerStartRow;
-  const dataRowHeight = outSheet.getRow(dataStart).height ?? spec.rowHeight ?? 15;
+  // 模板数据行有显式行高则沿用, 否则用 spec.rowHeight; 两者皆无则保持自动行高(不写死 15)
+  const dataRowHeight = outSheet.getRow(dataStart).height ?? spec.rowHeight;
 
   let templateDataRows: number;
   if (spec.dataEndRow) {
@@ -1237,7 +1302,7 @@ export async function convertSiruiToSupplier(
   for (let i = 0; i < outputRows.length; i++) {
     const { item, values } = outputRows[i];
     const row = outSheet.getRow(dataStart + i);
-    row.height = dataRowHeight;
+    if (dataRowHeight != null) row.height = dataRowHeight;
 
     for (let c = 1; c <= spec.maxCol; c++) {
       const v = values[c - 1];
@@ -1252,6 +1317,9 @@ export async function convertSiruiToSupplier(
         result: `=DISPIMG("${outputImageIds[i]}",1)`,
       };
     }
+
+    // 模板数据区本身无格式时, 按供应商逐列补全样式(华威尔)
+    spec.styleDataRow?.(row, spec.maxCol);
   }
 
   // 更新合计行 SUM 公式(航乐插行后)
@@ -1267,6 +1335,9 @@ export async function convertSiruiToSupplier(
 
   // ── 5. 写 buffer ──
   let buffer: Buffer = Buffer.from((await outWb.xlsx.writeBuffer()) as unknown as Uint8Array);
+
+  // 修复 ExcelJS 丢失模板默认字体(宋体 charset=134 → Calibri)
+  buffer = await applyTemplateDefaultFont(buffer, tplPath);
 
   // ── 6. DISPIMG 图片部件注入 ──
   if (spec.imageCol > 0) {

@@ -740,6 +740,7 @@ interface PacificSplitResult {
 - **长/宽/高**：美琦 = 源值 − 1（美琦特有）；英美/航乐混箱行尺寸继承当前箱（见已知坑 #120）
 - **报关/清关方式**：有单证→各供应商「单独报关/一般贸易/报关退税」；无单证→「买单报关/代理报关/买单报关/委托报关」；清关方式映射华威尔 D3 / 英美 B18 / 航乐 L7
 - **图片**：华威尔/美琦源用 WPS DISPIMG（按图片 buffer hash 去重注入）、航乐源用浮动图片；英美无图片列
+- **华威尔数据区格式**：模板数据区无格式，代码用 `HUAWEI_COL_STYLES` 逐列补全（微软雅黑 11/16 + Arial 18、中间列居中、薄边框、V 列无边框带换行），见已知坑 #124
 
 #### 数据来源
 
@@ -1589,6 +1590,15 @@ interface PacificSplitResult {
     - 现象一：美琦答案样本 R 列「物品箱号」= 源 G 列箱数原样透传（开新箱 = 箱数、混箱 = 0），初版误把混箱写成 1。修复：`boxCount >= 1 ? Math.round(boxCount) : 0`。
     - 现象二：美琦答案样本 M 列「材质」全是模板示例值（`铁+ABS塑料材质`/`铁+ABS`），与源真实材质（`不锈钢铝合金`/`铝合金`/`碳纤维`）不对应——作者制作答案时未覆盖材质列。本实现如实透传源材质，与答案的有意差异。
     - 位置：`src/lib/sirui-to-supplier.ts`（美琦 `mapItem` R/M 列）
+
+124. **思锐转供应商：华威尔数据区格式补全 + ExcelJS 样式/字体丢弃** (2026-11-11)
+    - 现象一：华威尔模板「发票箱单」数据区(R18 起)准备时未从答案复制格式，导致数据区无边框/字体/对齐；答案样本数据区是逐列格式（薄边框、微软雅黑 11/16、Arial 18、中间列居中、V 列无边框带换行）。
+    - 修复一：新增 `HUAWEI_COL_STYLES` 逐列样式表 + `SupplierSpec.styleDataRow` 钩子，华威尔数据行补全格式。
+    - 现象二：ExcelJS 从模板读入的相邻同格式单元格**共享同一个 style 对象**，逐个赋值 `cell.font`/`cell.alignment`/`cell.numFmt` 会原地改共享对象导致串列（B 列改 16pt 连带 C/D/E 列一起变）。修复：用 `cell.style = {...}` 整体替换以打断共享引用。
+    - 现象三：ExcelJS `readFile→writeBuffer` 丢弃字体颜色（`theme:1`/`FF000000`/`indexed` → 无颜色）与 4 位小数列宽（→ 2 位），且英美数据区空列(R-Z)字体被改（宋体11→微软雅黑10）。这些均不影响显示（黑色 / 亚像素），属已知不可修的装饰性差异，用 `applyTemplateDefaultFont` 仅修复了默认字体名/字符集。
+    - 现象四：英美模板 K 列(C11, R15-R18)残留带电/带磁/报关/清关示例值，答案样本该列为空。修复：`fillYingmeiAddress` 开头清 K15-K18。
+    - 现象五：英美数据区答案样本行高为自动(None)，初版 `dataRowHeight ?? 15` 兜底写死 15.0。修复：去掉 `?? 15` 兜底，模板无显式行高且 spec 无 `rowHeight` 时保持自动行高。
+    - 位置：`src/lib/sirui-to-supplier.ts`（`HUAWEI_COL_STYLES` / `styleDataRow` / `applyTemplateDefaultFont` / `fillYingmeiAddress` / `dataRowHeight`）
 
 ### 待重构项
 
