@@ -15,7 +15,7 @@
  *   3. 航乐(非FBA 一箱一行 explode)：Box No 顺序 1..N；混箱尺寸继承当前箱
  *   4. 美琦/英美(排序号)：累计区间 "起-止"(G=1 单个数字)，混箱共享当前累计箱号
  *   5. 单个产品净重 = 单箱净重 / 单箱数量
- *   6. 图片：华威尔/美琦源用 WPS DISPIMG(cellimages.xml)；航乐源用浮动图片(drawing1.xml)；英美无图片列
+ *   6. 图片：源图片机制自动识别(WPS DISPIMG cellimages.xml / Excel 浮动图 drawing1.xml)；英美无图片列
  *   7. 美琦 长/宽/高 = 源值 - 1(美琦特有)；英美地址字段为模板 VLOOKUP(按地址库编码带出)，
  *      商业/私人地址需清空地址库编码并手动填入收件信息
  *   8. 浮点计算统一 clean()(toPrecision(15)) 去噪, 对齐 Excel/WPS 精度(14.7/12 → 1.225)
@@ -363,7 +363,7 @@ async function extractDispimgImages(filePath: string): Promise<Map<string, Buffe
 }
 
 /**
- * 从源文件浮动图片提取产品图(航乐: 图片锚定 V 列 col21, 数据行 R25=锚点行24)。
+ * 从源文件浮动图片提取产品图(思锐源: 图片锚定 V 列 col21, 数据行 R25=锚点行24)。
  */
 async function extractSourceImages(filePath: string, itemCount: number): Promise<(Buffer | null)[]> {
   const result: (Buffer | null)[] = new Array(itemCount).fill(null);
@@ -703,7 +703,12 @@ const SUPPLIERS: Record<SiruiSupplierKey, SupplierSpec> = {
       b(16, opts.customsOverride || customsFor("美琦", top.customs)); // 报关方式
       b(17, top.totalBoxes);        // 箱数
       set("F1", opts.station || "中山仓"); // 预计交货站点
-      if (opts.pickupDate) set("F2", excelDateSerial(opts.pickupDate)); // 预计提货时间
+      if (opts.pickupDate) {
+        // 预计提货时间: 写 Excel 日期序列并设置日期格式, 否则 General 格式显示为一串数字
+        const f2 = ws.getCell("F2");
+        f2.value = excelDateSerial(opts.pickupDate);
+        f2.numFmt = "yyyy-mm-dd";
+      }
       set("F3", "自送货");          // 提货方式
     },
     mapItem(item, top, ctx) {
@@ -1085,6 +1090,11 @@ async function injectDispimg(
 
   const zip = await JSZip.loadAsync(buffer);
 
+  // 模板自带 media(浮动图等)已在 zip 中, 注入图片须避开同名文件(否则覆盖模板图)
+  const usedMedia = new Set(
+    Object.keys(zip.files).filter((n) => /^xl\/media\/[^/]+$/.test(n))
+  );
+
   // 按图片字节去重 media
   const hashOf = (b: Buffer) => crypto.createHash("sha1").update(b).digest("hex");
   const mediaByHash = new Map<string, string>(); // hash -> mediaName
@@ -1093,12 +1103,24 @@ async function injectDispimg(
   const entries: { id: string; rId: string; itemIndex: number }[] = [];
   const relEntries: { rId: string; target: string }[] = [];
 
+  // 生成不冲突的 media 文件名(跳过模板已占用的 imageN.ext)
+  const nextMediaName = (ext: string): string => {
+    let i = 1;
+    let name = `image${i}.${ext}`;
+    while (usedMedia.has(`xl/media/${name}`)) {
+      i++;
+      name = `image${i}.${ext}`;
+    }
+    usedMedia.add(`xl/media/${name}`);
+    return name;
+  };
+
   rows.forEach((row, n) => {
     const hash = hashOf(row.img);
     let mediaName = mediaByHash.get(hash);
     if (!mediaName) {
       const ext = imageExt(row.img);
-      mediaName = `image${mediaByHash.size + 1}.${ext}`;
+      mediaName = nextMediaName(ext);
       mediaByHash.set(hash, mediaName);
       zip.file(`xl/media/${mediaName}`, row.img);
     }
@@ -1163,6 +1185,43 @@ async function applyTemplateDefaultFont(buffer: Buffer, tplPath: string): Promis
   const replaced = styles.replace(/<font>[\s\S]*?<\/font>/, tplFont);
   zip.file("xl/styles.xml", replaced);
   return Buffer.from(await zip.generateAsync({ type: "nodebuffer" }));
+}
+
+/**
+ * 恢复模板中的浮动图片(drawingN.xml + 引用的 media)。
+ * ExcelJS writeBuffer 会把浮动图的 <a:ext cx/cy> 写成 0×0(图片不可见)，
+ * 这里从模板原样复制浮动图部件，恢复尺寸与图片实体。
+ */
+async function restoreFloatingImages(buffer: Buffer, tplPath: string): Promise<Buffer> {
+  const tplBuf = await fs.promises.readFile(tplPath);
+  const tplZip = await JSZip.loadAsync(tplBuf);
+  const outZip = await JSZip.loadAsync(buffer);
+
+  const drawingFiles = Object.keys(tplZip.files).filter((n) =>
+    /^xl\/drawings\/drawing\d+\.xml$/.test(n)
+  );
+  if (drawingFiles.length === 0) return buffer;
+
+  for (const df of drawingFiles) {
+    const dfContent = tplZip.file(df);
+    if (dfContent) outZip.file(df, Buffer.from(await dfContent.async("nodebuffer")));
+
+    // drawingN.xml.rels 引用 media(相对 xl/drawings/, 如 ../media/image1.jpeg)
+    const baseName = df.split("/").pop()!; // drawing1.xml
+    const relPath = `xl/drawings/_rels/${baseName}.rels`;
+    const relFile = tplZip.file(relPath);
+    if (relFile) {
+      outZip.file(relPath, Buffer.from(await relFile.async("nodebuffer")));
+      const relsXml = await relFile.async("string");
+      for (const m of relsXml.matchAll(/Target="([^"]+)"/g)) {
+        const mediaPath = path.posix.join("xl/drawings", m[1]);
+        const media = tplZip.file(mediaPath);
+        if (media) outZip.file(mediaPath, Buffer.from(await media.async("nodebuffer")));
+      }
+    }
+  }
+
+  return Buffer.from(await outZip.generateAsync({ type: "nodebuffer" }));
 }
 
 // ============================================================
@@ -1234,20 +1293,20 @@ export async function convertSiruiToSupplier(
     : baseSpec;
 
   // 提取源图片(仅 DISPIMG 供应商需要)
+  // 源图片机制取决于源发票本身(WPS DISPIMG 或 Excel 浮动图), 与目标供应商无关
   if (spec.imageCol > 0) {
-    if (supplier === "航乐") {
-      // 航乐源为浮动图片(drawing1.xml)
-      const images = await extractSourceImages(filePath, items.length);
+    // 1) WPS DISPIMG(cellimages.xml)
+    const dispimgMap = await extractDispimgImages(filePath);
+    items.forEach((it) => {
+      if (it.dispimgId && dispimgMap.has(it.dispimgId)) {
+        it.image = dispimgMap.get(it.dispimgId)!;
+      }
+    });
+    // 2) Excel 浮动图(drawing1.xml): 若仍有明细未取到图片则尝试(航乐源即此)
+    if (items.some((it) => !it.image)) {
+      const floatImages = await extractSourceImages(filePath, items.length);
       items.forEach((it, i) => {
-        it.image = images[i];
-      });
-    } else {
-      // 华威尔/美琦源为 WPS DISPIMG(cellimages.xml)
-      const dispimgMap = await extractDispimgImages(filePath);
-      items.forEach((it) => {
-        if (it.dispimgId && dispimgMap.has(it.dispimgId)) {
-          it.image = dispimgMap.get(it.dispimgId)!;
-        }
+        if (!it.image) it.image = floatImages[i];
       });
     }
   }
@@ -1351,6 +1410,9 @@ export async function convertSiruiToSupplier(
   if (spec.imageCol > 0) {
     buffer = await injectDispimg(buffer, outputImages, outputImageIds);
   }
+
+  // ── 7. 恢复模板浮动图片(ExcelJS 会丢失浮动图尺寸导致图片不可见) ──
+  buffer = await restoreFloatingImages(buffer, tplPath);
 
   const baseName = orderNo || path.basename(sourceFileName, path.extname(sourceFileName));
   const fileName = `${sanitizeFileName(baseName)}.xlsx`;

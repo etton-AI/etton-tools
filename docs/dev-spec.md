@@ -739,10 +739,10 @@ interface PacificSplitResult {
 - **美琦 / 英美（排序号）**：累计区间 `"起-止"`（单箱一个数字），混箱共享当前累计箱号；**美琦序号为字符串、英美单箱/混箱序号为数字**（对齐各自答案样本，见已知坑 #121）
 - **长/宽/高**：美琦 = 源值 − 1（美琦特有）；英美/航乐混箱行尺寸继承当前箱（见已知坑 #120）
 - **报关/清关方式**：有单证→各供应商「单独报关/一般贸易/报关退税」；无单证→「买单报关/代理报关/买单报关/委托报关」；清关方式映射华威尔 D3 / 英美 B18 / 航乐 L7；**英美 B15 带电 / B18 清关默认「否」**（源字段不准确，不透传）
-- **图片**：华威尔/美琦源用 WPS DISPIMG（按图片 buffer hash 去重注入）、航乐源用浮动图片；英美无图片列；**美琦源发票本身若无图片（无 media/cellimages）则无法嵌入，属数据源限制（见已知坑 #125）**
+- **图片**：源图片机制自动识别（WPS DISPIMG `cellimages.xml` / Excel 浮动图 `drawing1.xml`，按源文件实际包含的部件选择，与目标供应商无关），按图片 buffer hash 去重注入；英美无图片列；**美琦源发票本身若无图片（无 media/cellimages/drawing1）则无法嵌入，属数据源限制（见已知坑 #125）**
 - **华威尔数据区格式**：模板数据区无格式，代码用 `HUAWEI_COL_STYLES` 逐列补全（微软雅黑 11/16 + Arial 18、中间列居中、薄边框、V 列无边框带换行），见已知坑 #124
 - **华威尔残留示例**：模板「发票箱单」C9=HJYT260821326 / D9=卡派 / C12=备注 为残留示例，填充时清空；「填写范本」sheet 是参考图 sheet，转换不触碰
-- **美琦提货时间**：F2 预计提货时间由前端下拉选择（今天起 +30 天），`excelDateSerial` 转 Excel 日期序列；F1 站点、F3 自送货
+- **美琦提货时间**：F2 预计提货时间由前端下拉选择（今天起 +30 天），`excelDateSerial` 转 Excel 日期序列并设 `numFmt="yyyy-mm-dd"`（否则 General 格式显示为一串数字）；F1 站点、F3 自送货
 
 #### 数据来源
 
@@ -1608,6 +1608,18 @@ interface PacificSplitResult {
     - 现象三（美琦提货时间）：模板 F2「预计提货时间」需人工填 Excel 日期序列。新增 `pickupDate` 参数 + `excelDateSerial`（YYYY-MM-DD → 1900 系统序列），前端美琦专属下拉（今天起 +30 天）。
     - 现象四（数据源限制，未修复）：美琦源发票 101SO2610150008 本身不含任何产品图片（无 `xl/media`/`drawing1.xml`/`cellimages.xml`，V 列图片为 null，`vmlDrawing1.vml` 仅空批注框），答案样本的 41 张图是供应商后续手工插入——无法从源文件自动提取，需与用户确认图片来源。
     - 位置：`src/lib/sirui-to-supplier.ts`（华威尔/英美/美琦 `fillHeader` + `excelDateSerial`）、`src/app/sirui-to-supplier/page.tsx`（pickupDate 下拉）、`src/app/api/sirui-to-supplier/route.ts`
+
+126. **思锐转供应商：美琦提货时间 F2 显示为一串数字 + 源图片提取改为按源文件自动识别** (2026-11-12)
+    - 现象一（提货时间）：前端下拉选了预计提货时间，写入 F2 的是 Excel 日期序列数字，但模板 F2 单元格 `numFmt=General`，Excel/WPS 打开显示为 `46346` 一串数字而非日期。修复：`fillHeader` 写序列的同时设 `f2.numFmt = "yyyy-mm-dd"`（保留数字序列 + numFmt，不改成 `new Date()`——避免 UTC 分量偏一天，见已知坑 #103）。
+    - 现象二（图片提取硬编码供应商）：原实现按供应商分派图片提取——`航乐` 走浮动图(`drawing1.xml`)、其余走 DISPIMG(`cellimages.xml`)。但源图片机制是**源发票自身属性**（WPS 生成的源用 DISPIMG、Excel 生成的源用浮动图），与目标供应商无关，导致美琦/华威尔遇到浮动图源时无法提取。修复：`imageCol>0` 时先按 DISPIMG 提取、若仍有明细未取到图再回退浮动图提取，与供应商解耦。
+    - 位置：`src/lib/sirui-to-supplier.ts`（美琦 `fillHeader` F2 numFmt、`convertSiruiToSupplier` 源图片提取分支）
+
+127. **思锐转供应商：华威尔「填写范本 请参考」浮动图不一致（尺寸 0×0 + media 命名冲突）** (2026-11-12)
+    - 现象：华威尔输出发票「填写范本 请参考」的浮动参考图与正确答案不一致——要么不可见，要么变成产品图。
+    - 根因一（浮动图尺寸丢失）：ExcelJS `writeBuffer` 会把模板自带的浮动图(`xl/drawings/drawingN.xml`)的 `<a:ext cx/cy>` 写成 `0×0`，图片渲染成不可见。
+    - 根因二（media 命名冲突）：`injectDispimg` 注入产品图时 media 名用 `image${N}.${ext}` 从头计数，未避开模板自带的 `xl/media/image1.jpeg`，导致模板参考图被第一个产品图**覆盖**（hash 由模板值变为产品图值）。
+    - 修复：① `injectDispimg` 先收集 zip 内已存在的 `xl/media/*` 文件，注入时跳过被占用的 `imageN.ext` 名（`nextMediaName`）；② 新增 `restoreFloatingImages(buffer, tplPath)`，在注入后从模板原样复制 `drawingN.xml` + 其 `_rels` 里引用的 media，恢复浮动图尺寸与图片实体。
+    - 位置：`src/lib/sirui-to-supplier.ts`（`injectDispimg` 内 `usedMedia`/`nextMediaName`、新增 `restoreFloatingImages`、`convertSiruiToSupplier` 第 7 步调用）
 
 ### 待重构项
 
