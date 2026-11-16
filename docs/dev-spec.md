@@ -1621,6 +1621,18 @@ interface PacificSplitResult {
     - 修复：① `injectDispimg` 先收集 zip 内已存在的 `xl/media/*` 文件，注入时跳过被占用的 `imageN.ext` 名（`nextMediaName`）；② 新增 `restoreFloatingImages(buffer, tplPath)`，在注入后从模板原样复制 `drawingN.xml` + 其 `_rels` 里引用的 media，恢复浮动图尺寸与图片实体。
     - 位置：`src/lib/sirui-to-supplier.ts`（`injectDispimg` 内 `usedMedia`/`nextMediaName`、新增 `restoreFloatingImages`、`convertSiruiToSupplier` 第 7 步调用）
 
+128. **bl-review：电放保函「申请日期」不能用「今天」兜底（2026-11-12 全线 11 月 12 日事故）** (2026-11-16)
+    - 现象：`extract_customs_data` / `_empty_record` 里「申请日期」无追踪表匹配时回退 `datetime.now()`，导致 2026-11-12 批量输出全部票申请日期都是「2026 年 11 月 12 日」（实际应是到港时间，且各票不同）。
+    - 根因：申请日期语义 = 到港时间（物流追踪表 ETA 提前两天），底单提取阶段根本拿不到，却硬编码回退「今天」。
+    - 修复：三处默认值（`extract_customs_data`、`_empty_record`、`parse_review_excel`）统一改为空串，留待追踪表覆盖或人工填写；追踪表命中时 `review_app` 的 `_arrival_date` 覆盖逻辑不变。前端 `highlight` 空白字段标红本就生效（申请日期只有非空时才被中文排除规则跳过），空值会自动标红提示人工补填。
+    - 位置：`bl-service/core.py`（`extract_customs_data` 申请日期、`_empty_record`、`parse_review_excel`）
+
+129. **bl-review：文件夹名「易通科技报关资料」变体漏替换 → 提单被底单覆盖** (2026-11-16)
+    - 现象：2026-11-13 起拓锐部分票 ZIP 里「提单」实际是底单、且同名 pdf 重复打包两条（无独立提单文件）。
+    - 根因：`derive_output_name` 只替换「易通报关资料」，但文件夹名出现新变体「易通科技报关资料」→ 替换未命中，提单/底单/保函三份同名；`generate_batch` 里底单 `shutil.copy` 覆盖了已生成的提单 PDF。
+    - 修复：`derive_output_name` 用 `re.sub(r"易通(?:科技)?报关资料", kind, ...)` 兼容两种变体；并兜底——若替换未发生（仍同名），追加 `-{kind}` 后缀，保证三种文件绝不重名。
+    - 位置：`bl-service/core.py`（`derive_output_name`）
+
 ### 待重构项
 
 - [ ] 将 session 存储从内存 Map 改为临时文件或 Redis

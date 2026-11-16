@@ -1342,8 +1342,10 @@ def extract_customs_data(pdf_path, customer=DEFAULT_CUSTOMER):
     data["目的地"]   = data.get("目的港", "")
     # 运输工具 = 船名航次；非海运（铁路/卡航等）底单该列为「@」占位符 → 留空待人工填班列号/车次
     data["运输工具"] = data.get("船名航次", "")
-    _now = datetime.now()
-    data["申请日期"] = f"{_now.year} 年 {_now.month} 月 {_now.day} 日"
+    # 申请日期 = 到港时间（物流追踪表 ETA 提前两天，见 review_app 覆盖逻辑），底单提取阶段拿不到到港时间，
+    # 因此留空待追踪表覆盖或人工填写；不能用「今天」兜底——否则追踪表漏匹配时全票申请日期都是当天，
+    # 造成 2026-11-12 全线「申请日期=11月12日」的错误输出。
+    data["申请日期"] = ""
     data["文件命名"] = data.get("提单号", "提单") or "提单"
     return data
 
@@ -1355,7 +1357,7 @@ def _empty_record(customer=DEFAULT_CUSTOMER):
         "shipper": cfg["shipper_bl"], "consignee": cfg["consignee_bl"], "提单号": "", "系统SO": "", "柜号": "", "船名航次": "",
         "起运地": "", "目的港": "", "运抵国": "", "运输方式": "", "关区名": "", "箱数": "", "品名": "", "总重量": "", "总体积": "",
         "起运日期": "", "申请单位": cfg["shipper_telex"], "收货人(保函)": cfg["consignee_telex"], "目的地": "", "运输工具": "",
-        "申请日期": datetime.now().strftime("%Y 年 %m 月 %d 日"),
+        "申请日期": "",
         "文件命名": "提单",
     }
 
@@ -1458,7 +1460,7 @@ def parse_review_excel(xlsx_path):
         rec["收货人(保函)"] = d.get("收货人(保函)", rec.get("consignee", ""))
         rec["运输工具"] = d.get("运输工具", rec.get("船名航次", ""))
         rec["目的地"]   = d.get("目的地", rec.get("目的港", ""))
-        rec["申请日期"] = d.get("申请日期", datetime.now().strftime("%Y 年 %m 月 %d 日"))
+        rec["申请日期"] = d.get("申请日期", "")
         rec["文件命名"] = rec.get("文件命名") or rec.get("提单号", "提单")
         records.append(rec)
     return records
@@ -1862,12 +1864,21 @@ def merge_declaration_pdfs(pdf_paths, output_path):
 
 
 def derive_output_name(folder_name, kind):
-    """文件夹名 -> 输出文件名：把「易通报关资料」替换成 kind（提单/保函/底单），其余严格照抄。
+    """文件夹名 -> 输出文件名：把「易通(科技)报关资料」替换成 kind（提单/电放保函/底单），其余严格照抄。
 
     例：'6月第1周-(易通报关资料）-BG20260605002  10票  英国铁路不包税卡派 54箱  是4'
       -> '6月第1周-(提单）-BG20260605002  10票  英国铁路不包税卡派 54箱  是4'
+
+    兼容命名变体「易通科技报关资料」（2026-11 起出现的写法）。若只替换「易通报关资料」，
+    该变体漏替换会导致 提单/底单/保函 三份同名，generate_batch 里底单 copy 会覆盖已生成的提单，
+    ZIP 只剩底单（用户拿到的「提单」实际是底单）。
+    兜底：文件夹名不含关键词（替换未发生）时追加 kind 后缀，保证三种文件不重名。
     """
-    return str(folder_name).replace("易通报关资料", kind)
+    name = str(folder_name)
+    replaced = re.sub(r"易通(?:科技)?报关资料", kind, name)
+    if replaced == name:
+        replaced = f"{name}-{kind}"
+    return replaced
 
 
 _COUNTRIES = [
